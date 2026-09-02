@@ -19,7 +19,7 @@ import {
     formatBytes,
     tryWriteFileSync,
     tryReadFileSync,
-    tryDeleteFile,
+    tryDeleteFileAsync,
     readFirstLine,
     isPathUnderParent,
 } from '../util.js';
@@ -28,6 +28,38 @@ const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean'
 const maxTotalChatBackups = Number(getConfigValue('backups.chat.maxTotalBackups', -1, 'number'));
 const throttleInterval = Number(getConfigValue('backups.chat.throttleInterval', 10_000, 'number'));
 const checkIntegrity = !!getConfigValue('backups.chat.checkIntegrity', true, 'boolean');
+const chatScanConcurrency = 8;
+
+/**
+ * Maps items with a small concurrency limit so a large chat directory does not
+ * open every JSONL file at once while still avoiding serial file scans.
+ * @template T, R
+ * @param {T[]} items
+ * @param {(item: T, index: number) => Promise<R>} mapper
+ * @param {number} concurrency
+ * @returns {Promise<R[]>}
+ */
+async function mapWithConcurrency(items, mapper, concurrency) {
+    if (items.length === 0) {
+        return [];
+    }
+
+    const results = Array(items.length);
+    let nextIndex = 0;
+    const worker = async () => {
+        while (true) {
+            const index = nextIndex++;
+            if (index >= items.length) {
+                return;
+            }
+            results[index] = await mapper(items[index], index);
+        }
+    };
+
+    const workerCount = Math.min(Math.max(1, concurrency), items.length);
+    await Promise.all(Array.from({ length: workerCount }, worker));
+    return results;
+}
 
 export const CHAT_BACKUPS_PREFIX = 'chat_';
 
@@ -651,7 +683,7 @@ router.post('/rename', validateAvatarUrlMiddleware, async function (request, res
     }
 });
 
-router.post('/delete', validateAvatarUrlMiddleware, function (request, response) {
+router.post('/delete', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         if (!path.extname(request.body.chatfile)) {
             request.body.chatfile += '.jsonl';
@@ -664,7 +696,7 @@ router.post('/delete', validateAvatarUrlMiddleware, function (request, response)
             return response.sendStatus(400);
         }
         //Return success if the file was deleted.
-        if (tryDeleteFile(chatFilePath)) {
+        if (await tryDeleteFileAsync(chatFilePath)) {
             return response.send({ ok: true });
         } else {
             console.error('The chat file was not deleted.');
@@ -897,7 +929,7 @@ router.post('/group/info', async (request, response) => {
     }
 });
 
-router.post('/group/delete', (request, response) => {
+router.post('/group/delete', async (request, response) => {
     try {
         if (!request.body || !request.body.id) {
             return response.sendStatus(400);
@@ -907,7 +939,7 @@ router.post('/group/delete', (request, response) => {
         const chatFilePath = path.join(request.user.directories.groupChats, sanitize(`${id}.jsonl`));
 
         //Return success if the file was deleted.
-        if (tryDeleteFile(chatFilePath)) {
+        if (await tryDeleteFileAsync(chatFilePath)) {
             return response.send({ ok: true });
         } else {
             console.error('The group chat file was not deleted.');
@@ -1017,9 +1049,10 @@ router.post('/search', validateAvatarUrlMiddleware, async function (request, res
             return fragments.every(fragment => textArray.some(text => String(text ?? '').toLowerCase().includes(fragment)));
         };
 
-        for (const chatFile of chatFiles) {
-            const matcher = query ? hasTextMatch : null;
-            const chatInfo = await getChatInfo(chatFile, {}, false, matcher);
+        const matcher = query ? hasTextMatch : null;
+        const chatInfos = await mapWithConcurrency(chatFiles, (chatFile) => getChatInfo(chatFile, {}, false, matcher), chatScanConcurrency);
+
+        for (const chatInfo of chatInfos) {
             const hasMatch = chatInfo.match || hasTextMatch([chatInfo.file_id ?? '']);
 
             // Skip corrupted or invalid chat files
@@ -1063,62 +1096,94 @@ router.post('/recent', async function (request, response) {
             const pngDirents = await fs.promises.readdir(request.user.directories.characters, { withFileTypes: true });
             const pngFiles = pngDirents.filter(e => e.isFile() && path.extname(e.name) === '.png').map(e => e.name);
 
-            for (const pngFile of pngFiles) {
+            const chatFilesByCharacter = await mapWithConcurrency(pngFiles, async (pngFile) => {
                 const chatsDirectory = pngFile.replace('.png', '');
                 const pathToChats = path.join(request.user.directories.chats, chatsDirectory);
-                if (!fs.existsSync(pathToChats)) {
-                    continue;
-                }
-                const pathStats = await fs.promises.stat(pathToChats);
-                if (pathStats.isDirectory()) {
-                    const chatFiles = await fs.promises.readdir(pathToChats);
-                    const jsonlFiles = chatFiles.filter(file => path.extname(file) === '.jsonl');
-
-                    for (const file of jsonlFiles) {
-                        const filePath = path.join(pathToChats, file);
-                        const stats = await fs.promises.stat(filePath);
-                        allChatFiles.push({ pngFile, filePath, mtime: stats.mtimeMs });
+                let chatFiles;
+                try {
+                    chatFiles = await fs.promises.readdir(pathToChats, { withFileTypes: true });
+                } catch (error) {
+                    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+                        return [];
                     }
+                    throw error;
                 }
-            }
+
+                const jsonlFiles = chatFiles.filter(file => file.isFile() && path.extname(file.name) === '.jsonl');
+                const entries = await mapWithConcurrency(jsonlFiles, async (file) => {
+                    const filePath = path.join(pathToChats, file.name);
+                    try {
+                        const stats = await fs.promises.stat(filePath);
+                        return { pngFile, filePath, mtime: stats.mtimeMs };
+                    } catch (error) {
+                        if (error.code === 'ENOENT') {
+                            return null;
+                        }
+                        throw error;
+                    }
+                }, chatScanConcurrency);
+
+                return entries.filter(Boolean);
+            }, chatScanConcurrency);
+
+            allChatFiles.push(...chatFilesByCharacter.flat());
         };
 
         const getGroupChatFiles = async () => {
             const groupDirents = await fs.promises.readdir(request.user.directories.groups, { withFileTypes: true });
             const groups = groupDirents.filter(e => e.isFile() && path.extname(e.name) === '.json').map(e => e.name);
 
-            for (const group of groups) {
+            const groupChatFiles = await mapWithConcurrency(groups, async (group) => {
                 try {
                     const groupPath = path.join(request.user.directories.groups, group);
                     const groupContents = await fs.promises.readFile(groupPath, 'utf8');
                     const groupData = JSON.parse(groupContents);
 
-                    if (Array.isArray(groupData.chats)) {
-                        for (const chat of groupData.chats) {
-                            const filePath = path.join(request.user.directories.groupChats, `${chat}.jsonl`);
-                            if (!fs.existsSync(filePath)) {
-                                continue;
-                            }
-                            const stats = await fs.promises.stat(filePath);
-                            allChatFiles.push({ groupId: groupData.id, filePath, mtime: stats.mtimeMs });
-                        }
+                    if (!Array.isArray(groupData.chats)) {
+                        return [];
                     }
+
+                    const entries = await mapWithConcurrency(groupData.chats, async (chat) => {
+                        const filePath = path.join(request.user.directories.groupChats, `${chat}.jsonl`);
+                        try {
+                            const stats = await fs.promises.stat(filePath);
+                            return { groupId: groupData.id, filePath, mtime: stats.mtimeMs };
+                        } catch (error) {
+                            if (error.code === 'ENOENT') {
+                                return null;
+                            }
+                            throw error;
+                        }
+                    }, chatScanConcurrency);
+
+                    return entries.filter(Boolean);
                 } catch (error) {
                     // Skip group files that can't be read or parsed
-                    continue;
+                    return [];
                 }
-            }
+            }, chatScanConcurrency);
+
+            allChatFiles.push(...groupChatFiles.flat());
         };
 
         const getRootChatFiles = async () => {
             const dirents = await fs.promises.readdir(request.user.directories.chats, { withFileTypes: true });
-            const chatFiles = dirents.filter(e => e.isFile() && path.extname(e.name) === '.jsonl').map(e => e.name);
+            const chatFiles = dirents.filter(e => e.isFile() && path.extname(e.name) === '.jsonl');
 
-            for (const file of chatFiles) {
-                const filePath = path.join(request.user.directories.chats, file);
-                const stats = await fs.promises.stat(filePath);
-                allChatFiles.push({ filePath, mtime: stats.mtimeMs });
-            }
+            const entries = await mapWithConcurrency(chatFiles, async (file) => {
+                const filePath = path.join(request.user.directories.chats, file.name);
+                try {
+                    const stats = await fs.promises.stat(filePath);
+                    return { filePath, mtime: stats.mtimeMs };
+                } catch (error) {
+                    if (error.code === 'ENOENT') {
+                        return null;
+                    }
+                    throw error;
+                }
+            }, chatScanConcurrency);
+
+            allChatFiles.push(...entries.filter(Boolean));
         };
 
         await Promise.allSettled([getCharacterChatFiles(), getGroupChatFiles(), getRootChatFiles()]);

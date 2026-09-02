@@ -67,6 +67,10 @@ export class StreamingDisplay {
     #isStopped = false;
     /** @type {ReturnType<typeof setTimeout> | null} */
     #hideTimeoutId = null;
+    /** @type {string|null} */
+    #lastReasoningText = null;
+    /** @type {string|null} */
+    #lastContentText = null;
 
     /**
      * Shows the streaming display panel.
@@ -79,6 +83,8 @@ export class StreamingDisplay {
         this.#isMinimized = false;
         this.#isComplete = false;
         this.#onStop = onStop;
+        this.#lastReasoningText = null;
+        this.#lastContentText = null;
         this.#clearHideTimeout();
 
         this.#element = document.createElement('div');
@@ -262,7 +268,10 @@ export class StreamingDisplay {
         if (!this.#reasoningContent || !this.#reasoningSection || !text) return this;
 
         this.#reasoningSection.style.display = '';
-        this.#reasoningContent.innerHTML = messageFormatting(text, '', false, false, -1, {}, true);
+        if (text !== this.#lastReasoningText) {
+            this.#lastReasoningText = text;
+            this.#reasoningContent.innerHTML = messageFormatting(text, '', false, false, -1, {}, true);
+        }
         this.#reasoningContent.scrollTop = this.#reasoningContent.scrollHeight;
         return this;
     }
@@ -278,7 +287,10 @@ export class StreamingDisplay {
 
         this.#hasContent = true;
         this.#textSection.style.display = '';
-        this.#textContent.innerHTML = messageFormatting(text, '', false, false, -1, {}, false);
+        if (text !== this.#lastContentText) {
+            this.#lastContentText = text;
+            this.#textContent.innerHTML = messageFormatting(text, '', false, false, -1, {}, false);
+        }
         this.#textContent.scrollTop = this.#textContent.scrollHeight;
         return this;
     }

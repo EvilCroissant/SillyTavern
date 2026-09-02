@@ -49,6 +49,8 @@ const UI = {
     $maxAdditions: $('#reasoning_max_additions'),
 };
 
+let reasoningInitialized = false;
+
 /**
  * Enum representing the type of the reasoning for a message (where it came from)
  * @readonly
@@ -280,6 +282,8 @@ export class ReasoningHandler {
     #isParsingReasoning = false;
     /** @type {number?} When reasoning is being parsed manually, and the reasoning has ended, this will be the index at which the actual messages starts */
     #parsingReasoningMesStartIndex = null;
+    /** @type {boolean} Whether this.reasoning currently contains the regexed result. */
+    #reasoningIsFormatted = false;
 
     /**
      * @param {Date?} [timeStarted=null] - When the generation started
@@ -320,6 +324,7 @@ export class ReasoningHandler {
      */
     initContinue(promptReasoning) {
         this.reasoning = promptReasoning.prefixReasoning;
+        this.#reasoningIsFormatted = false;
         this.state = promptReasoning.prefixIncomplete ? ReasoningState.None : ReasoningState.Done;
         this.startTime = this.initialTime;
         this.endTime = promptReasoning.prefixDuration ? new Date(this.initialTime.getTime() + promptReasoning.prefixDuration) : null;
@@ -360,6 +365,7 @@ export class ReasoningHandler {
 
         this.type = extra?.reasoning_type;
         this.reasoning = extra?.reasoning ?? '';
+        this.#reasoningIsFormatted = true;
         this.reasoningDisplayText = extra?.reasoning_display_text ?? null;
 
         if (this.state !== ReasoningState.None) {
@@ -376,6 +382,7 @@ export class ReasoningHandler {
             this.state = this.#isHiddenReasoningModel ? ReasoningState.Thinking : ReasoningState.None;
             this.type = null;
             this.reasoning = '';
+            this.#reasoningIsFormatted = true;
             this.reasoningDisplayText = null;
             this.initialTime = new Date();
             this.startTime = null;
@@ -416,6 +423,7 @@ export class ReasoningHandler {
             return false;
         }
 
+        const useExistingFormattedReasoning = reasoning === null && !allowReset && this.#reasoningIsFormatted;
         reasoning = allowReset ? reasoning ?? this.reasoning : reasoning || this.reasoning;
         reasoning = trimSpaces(reasoning);
 
@@ -426,7 +434,10 @@ export class ReasoningHandler {
         const extra = chat[messageId].extra;
 
         const reasoningChanged = extra.reasoning !== reasoning;
-        this.reasoning = getRegexedString(reasoning ?? '', regex_placement.REASONING);
+        if (!useExistingFormattedReasoning) {
+            this.reasoning = getRegexedString(reasoning ?? '', regex_placement.REASONING);
+            this.#reasoningIsFormatted = true;
+        }
 
         this.type = (this.#isParsingReasoning || this.#parsingReasoningMesStartIndex) ? ReasoningType.Parsed : ReasoningType.Model;
 
@@ -449,13 +460,14 @@ export class ReasoningHandler {
      * @param {number} messageId - The ID of the message to process
      * @param {boolean} mesChanged - Whether the message has changed
      * @param {PromptReasoning} promptReasoning - Prompt reasoning object
-     * @returns {Promise<void>}
+     * @returns {Promise<boolean>} Whether the reasoning DOM was updated
      */
     async process(messageId, mesChanged, promptReasoning) {
+        const previousState = this.state;
         mesChanged = this.#autoParseReasoningFromMessage(messageId, mesChanged, promptReasoning);
 
         if (!this.reasoning && !this.#isHiddenReasoningModel)
-            return;
+            return false;
 
         // Ensure reasoning string is updated and regexes are applied correctly
         const reasoningChanged = this.updateReasoning(messageId, null, { persist: true });
@@ -467,7 +479,26 @@ export class ReasoningHandler {
         if ((this.#isHiddenReasoningModel || !reasoningChanged) && mesChanged && this.state === ReasoningState.Thinking) {
             this.endTime = new Date();
             await this.finish(messageId);
+            return true;
         }
+
+        // Streaming used to render reasoning before every message update. Only
+        // redraw it when its text or state actually changed.
+        if (reasoningChanged || this.state !== previousState) {
+            this.updateDom(messageId);
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Updates only the lightweight reasoning timer UI.
+     * @param {number} messageId - The ID of the message to update
+     */
+    updateTimeDom(messageId) {
+        this.#checkDomElements(messageId);
+        this.#updateReasoningTimeUI();
     }
 
     /**
@@ -512,11 +543,13 @@ export class ReasoningHandler {
 
         // If we are in manual parsing mode, all currently streaming mes tokens will go to the reasoning block
         this.reasoning = parseTarget.slice(power_user.reasoning.prefix.length);
+        this.#reasoningIsFormatted = false;
         message.mes = '';
 
         // If the reasoning contains the ending suffix, we cut that off and continue as message streaming
         if (this.reasoning.includes(power_user.reasoning.suffix)) {
             this.reasoning = this.reasoning.slice(0, this.reasoning.indexOf(power_user.reasoning.suffix));
+            this.#reasoningIsFormatted = false;
             this.#parsingReasoningMesStartIndex = parseTarget.indexOf(power_user.reasoning.suffix) + power_user.reasoning.suffix.length;
             message.mes = trimSpaces(parseTarget.slice(this.#parsingReasoningMesStartIndex));
             this.#isParsingReasoning = false;
@@ -1694,6 +1727,11 @@ export async function loadReasoningTemplates(data) {
  * Initializes reasoning settings and event handlers.
  */
 export function initReasoning() {
+    if (reasoningInitialized) {
+        return;
+    }
+
+    reasoningInitialized = true;
     loadReasoningSettings();
     setReasoningEventHandlers();
     registerReasoningSlashCommands();

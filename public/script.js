@@ -3639,17 +3639,20 @@ class StreamingProcessor {
      * @param {number} messageId Current message ID
      * @param {boolean?} continueOnReasoning If continuing on reasoning
      */
-    async #checkDomElements(messageId, continueOnReasoning = null) {
+    async #checkDomElements(messageId, continueOnReasoning = null, updateReasoningDom = true) {
         if (this.messageDom === null || this.messageTextDom === null) {
             this.messageDom = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
             this.messageTextDom = this.messageDom?.querySelector('.mes_text');
             this.messageTimerDom = this.messageDom?.querySelector('.mes_timer');
             this.messageTokenCounterDom = this.messageDom?.querySelector('.tokenCounterDisplay');
         }
+        let reasoningDomUpdated = false;
         if (continueOnReasoning) {
-            await this.reasoningHandler.process(messageId, false, this.promptReasoning);
+            reasoningDomUpdated = await this.reasoningHandler.process(messageId, false, this.promptReasoning);
         }
-        this.reasoningHandler.updateDom(messageId);
+        if (updateReasoningDom && !reasoningDomUpdated) {
+            this.reasoningHandler.updateDom(messageId);
+        }
     }
 
     #updateMessageBlockVisibility() {
@@ -3726,8 +3729,11 @@ class StreamingProcessor {
             this.sendTextarea.value = processedText;
             this.sendTextarea.dispatchEvent(new Event('input', { bubbles: true }));
         } else {
-            const mesChanged = chat[messageId].mes !== processedText;
-            await this.#checkDomElements(messageId);
+            const previousMessageText = chat[messageId].mes;
+            const mesChanged = previousMessageText !== processedText;
+            if (this.messageDom === null || this.messageTextDom === null) {
+                await this.#checkDomElements(messageId, null, false);
+            }
             this.#updateMessageBlockVisibility();
             const currentTime = new Date();
             chat[messageId].mes = processedText;
@@ -3739,8 +3745,12 @@ class StreamingProcessor {
             chat[messageId].extra.time_to_first_token = this.timeToFirstToken;
 
             // Update reasoning
-            await this.reasoningHandler.process(messageId, mesChanged, this.promptReasoning);
+            const reasoningDomUpdated = await this.reasoningHandler.process(messageId, mesChanged, this.promptReasoning);
+            if (!reasoningDomUpdated) {
+                this.reasoningHandler.updateTimeDom(messageId);
+            }
             processedText = chat[messageId].mes;
+            const shouldRenderText = isFinal || previousMessageText !== processedText;
 
             // Token count update.
             const tokenCountText = this.reasoningHandler.reasoning + processedText;
@@ -3762,21 +3772,23 @@ class StreamingProcessor {
                 };
             }
 
-            const formattedText = messageFormatting(
-                processedText,
-                chat[messageId].name,
-                chat[messageId].is_system,
-                chat[messageId].is_user,
-                messageId,
-                {},
-                false,
-                this.messageDepth,
-            );
-            if (this.messageTextDom instanceof HTMLElement) {
-                if (power_user.stream_fade_in) {
-                    applyStreamFadeIn(this.messageTextDom, formattedText);
-                } else {
-                    this.messageTextDom.innerHTML = formattedText;
+            if (shouldRenderText) {
+                const formattedText = messageFormatting(
+                    processedText,
+                    chat[messageId].name,
+                    chat[messageId].is_system,
+                    chat[messageId].is_user,
+                    messageId,
+                    {},
+                    false,
+                    this.messageDepth,
+                );
+                if (this.messageTextDom instanceof HTMLElement) {
+                    if (power_user.stream_fade_in) {
+                        applyStreamFadeIn(this.messageTextDom, formattedText);
+                    } else {
+                        this.messageTextDom.innerHTML = formattedText;
+                    }
                 }
             }
 
@@ -3921,7 +3933,8 @@ class StreamingProcessor {
         this.stoppingStrings = getStoppingStrings(isImpersonate, isContinue, main_api);
 
         try {
-            const sw = new Stopwatch(1000 / power_user.streaming_fps);
+            const baseStreamingInterval = 1000 / power_user.streaming_fps;
+            const sw = new Stopwatch(baseStreamingInterval);
             const timestamps = [];
             for await (const { text, swipes, logprobs, toolCalls, state } of this.generator()) {
                 const now = Date.now();
@@ -3939,12 +3952,32 @@ class StreamingProcessor {
                 if (logprobs) {
                     this.messageLogprobs.push(...(Array.isArray(logprobs) ? logprobs : [logprobs]));
                 }
-                // Get the updated reasoning string into the handler
-                this.reasoningHandler.updateReasoning(this.messageId, state?.reasoning);
+                // Get the updated reasoning string into the handler when the
+                // provider included one. The progress handler reuses this
+                // formatted value instead of running reasoning regexes twice.
+                if (state?.reasoning !== undefined) {
+                    this.reasoningHandler.updateReasoning(this.messageId, state.reasoning);
+                }
                 this.images = state?.images ?? [];
                 this.reasoningSignature = state?.signature ?? null;
                 await eventSource.emit(event_types.STREAM_TOKEN_RECEIVED, text);
-                await sw.tick(async () => await this.onProgressStreaming(this.messageId, this.continueMessage + text));
+                await sw.tick(async () => {
+                    const startedAt = performance.now();
+                    await this.onProgressStreaming(this.messageId, this.continueMessage + text);
+                    const streamingUpdateDuration = performance.now() - startedAt;
+
+                    // Full-message formatting gets more expensive as the
+                    // response grows. Back off when an update itself exceeds
+                    // the target frame interval, then recover gradually.
+                    if (streamingUpdateDuration > sw.interval) {
+                        sw.interval = Math.min(
+                            baseStreamingInterval * 4,
+                            Math.max(sw.interval, streamingUpdateDuration * 1.25),
+                        );
+                    } else if (sw.interval > baseStreamingInterval) {
+                        sw.interval = Math.max(baseStreamingInterval, sw.interval * 0.9);
+                    }
+                });
             }
             const seconds = (timestamps[timestamps.length - 1] - timestamps[0]) / 1000;
             console.warn(`Stream stats: ${timestamps.length} tokens, ${seconds.toFixed(2)} seconds, rate: ${Number(timestamps.length / seconds).toFixed(2)} TPS`);
@@ -8649,9 +8682,16 @@ async function displayChats(searchQuery, currentChat, displayName, avatarImg, se
         }
 
         const filteredData = await response.json();
-        $('#select_chat_div').empty();
+        const chatContainer = document.getElementById('select_chat_div');
+        if (!chatContainer) {
+            return;
+        }
+
+        chatContainer.replaceChildren();
 
         filteredData.sort((a, b) => sortMoments(timestampToMoment(a.last_mes), timestampToMoment(b.last_mes)));
+        const fragment = document.createDocumentFragment();
+        const highlightedTemplates = [];
 
         for (const chat of filteredData) {
             const isSelected = currentChat === chat.file_name;
@@ -8669,13 +8709,19 @@ async function displayChats(searchQuery, currentChat, displayName, avatarImg, se
                 template.find('.select_chat_block').attr('highlight', String(true));
             }
 
-            $('#select_chat_div').append(template);
+            fragment.appendChild(template[0]);
 
             if (Array.isArray(highlightNames) && highlightNames.includes(chat.file_name)) {
-                const templateOffset = template.offset().top - template.parent().offset().top;
-                $('#select_chat_div').scrollTop(templateOffset);
-                flashHighlight(template, debounce_timeout.extended);
+                highlightedTemplates.push(template);
             }
+        }
+
+        chatContainer.appendChild(fragment);
+
+        for (const template of highlightedTemplates) {
+            const templateOffset = template.offset().top - $(chatContainer).offset().top;
+            $(chatContainer).scrollTop(templateOffset);
+            flashHighlight(template, debounce_timeout.extended);
         }
     } catch (error) {
         console.error('Error loading chats:', error);

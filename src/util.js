@@ -1553,6 +1553,25 @@ export function tryDeleteFile(filePath) {
 }
 
 /**
+ * Attempts to delete a file without blocking the event loop.
+ * @param {string} filePath Target file.
+ * @returns {Promise<boolean>} Returns true if the file was found and deleted.
+ */
+export async function tryDeleteFileAsync(filePath) {
+    try {
+        await fs.promises.unlink(filePath);
+        console.info(`Deleted file: ${filePath}`);
+        return true;
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            console.error(`File not found '${filePath}'`);
+            return false;
+        }
+        throw error;
+    }
+}
+
+/**
  * Reads the first line of a file asynchronously.
  * @param {string} filePath Path to the file
  * @returns {Promise<string>} The first line of the file

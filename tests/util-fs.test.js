@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, test, expect, jest } from '@jest/globa
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getImages } from '../src/util';
+import { getImages, tryDeleteFileAsync } from '../src/util';
 import { MEDIA_REQUEST_TYPE } from '../src/constants';
 
 describe('getImages', () => {
@@ -132,5 +132,16 @@ describe('getImages', () => {
     test('returns empty array for an empty directory', () => {
         expect(getImages(tmpDir, 'name')).toEqual([]);
         expect(getImages(tmpDir, 'date')).toEqual([]);
+    });
+
+    test('deletes a file asynchronously', async () => {
+        writeFile('delete-me.tmp');
+
+        await expect(tryDeleteFileAsync(path.join(tmpDir, 'delete-me.tmp'))).resolves.toBe(true);
+        expect(fs.existsSync(path.join(tmpDir, 'delete-me.tmp'))).toBe(false);
+    });
+
+    test('returns false when an asynchronous delete target is missing', async () => {
+        await expect(tryDeleteFileAsync(path.join(tmpDir, 'missing.tmp'))).resolves.toBe(false);
     });
 });
