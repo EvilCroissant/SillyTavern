@@ -46,7 +46,7 @@ body:
       placeholder: |
         - Node.js version (if applicable): [run `node --version` in cmd]
         - Generation API [e.g. KoboldAI, OpenAI]
-        - Branch [staging, release]
+        - Branch [staging, develop]
         - Model [e.g. Pygmalion 6b, LLaMa 13b]
     validations:
       required: false

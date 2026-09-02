@@ -1,0 +1,69 @@
+name: Sync upstream staging
+
+on:
+  schedule:
+    - cron: '0 */8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-staging
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Sync staging from upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/SillyTavern/SillyTavern.git
+          git fetch --no-tags origin \
+            "+refs/heads/staging:refs/remotes/origin/staging"
+          git fetch --no-tags upstream \
+            "+refs/heads/staging:refs/remotes/upstream/staging"
+
+          fork_staging=$(git rev-parse refs/remotes/origin/staging)
+          upstream_staging=$(git rev-parse refs/remotes/upstream/staging)
+
+          if [[ "$fork_staging" == "$upstream_staging" ]]; then
+            echo "staging is already up to date"
+          else
+            git push \
+              --force-with-lease="refs/heads/staging:${fork_staging}" \
+              origin \
+              "${upstream_staging}:refs/heads/staging"
+          fi
+
+      - name: Merge staging into develop
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin \
+            "+refs/heads/develop:refs/remotes/origin/develop" \
+            "+refs/heads/staging:refs/remotes/origin/staging"
+
+          develop_before=$(git rev-parse refs/remotes/origin/develop)
+          git switch --force-create develop refs/remotes/origin/develop
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-edit refs/remotes/origin/staging
+          develop_after=$(git rev-parse HEAD)
+
+          if [[ "$develop_before" == "$develop_after" ]]; then
+            echo "develop already contains staging"
+            exit 0
+          fi
+
+          git push \
+            --force-with-lease="refs/heads/develop:${develop_before}" \
+            origin \
+            "${develop_after}:refs/heads/develop"

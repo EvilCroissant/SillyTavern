@@ -2059,7 +2059,7 @@ export async function loadWorldInfo(name) {
 }
 
 export async function updateWorldInfoList() {
-    const result = await fetch('/api/settings/get', {
+    const result = await fetch('/api/worldinfo/list', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify({}),
@@ -2068,7 +2068,7 @@ export async function updateWorldInfoList() {
     if (result.ok) {
         const data = await result.json();
         const editorSelected = String($('#world_editor_select').find(':selected').text());
-        world_names = data.world_names?.length ? data.world_names : [];
+        world_names = Array.isArray(data) ? data.map(item => item.file_id).filter(Boolean) : [];
         $('#world_info').find('option[value!=""]').remove();
         $('#world_editor_select').find('option[value!=""]').remove();
 

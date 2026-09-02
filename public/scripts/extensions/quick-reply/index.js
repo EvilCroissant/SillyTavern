@@ -1,4 +1,4 @@
-import { chat, chat_metadata, eventSource, event_types, getRequestHeaders, this_chid, characters } from '../../../script.js';
+import { chat, chat_metadata, eventSource, event_types, getRequestHeaders, settingsData, this_chid, characters } from '../../../script.js';
 import { extension_settings } from '../../extensions.js';
 import { QuickReplyApi } from './api/QuickReplyApi.js';
 import { AutoExecuteHandler } from './src/AutoExecuteHandler.js';
@@ -53,14 +53,24 @@ export let quickReplyApi;
 
 
 const loadSets = async () => {
-    const response = await fetch('/api/settings/get', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({}),
-    });
+    let setList;
+    if (Array.isArray(settingsData?.quickReplyPresets)) {
+        setList = settingsData.quickReplyPresets;
+    } else {
+        const response = await fetch('/api/settings/get', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({}),
+        });
 
-    if (response.ok) {
-        const setList = (await response.json()).quickReplyPresets ?? [];
+        if (!response.ok) {
+            return;
+        }
+
+        setList = (await response.json()).quickReplyPresets ?? [];
+    }
+
+    if (Array.isArray(setList)) {
         for (const set of setList) {
             if (set.version !== 2) {
                 // migrate old QR set

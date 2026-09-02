@@ -15,7 +15,7 @@
 5. Create a git branch (recommended), review the [git book](https://git-scm.com/book/en/v2/Getting-Started-About-Version-Control) if you haven't.
 6. Make your changes and test them locally.
 7. Commit the changes and push the branch to the remote repo.
-8. Go to GitHub, and open a pull request, targeting the appropriate upstream branch.
+8. Go to GitHub, and open a pull request targeting the `develop` branch of your fork.
 
 ## Contribution guidelines
 
@@ -29,13 +29,7 @@ Our standards are pretty low, but make sure the code is not too ugly:
 
 ### Use the correct target branch
 
-Create pull requests for the `staging` branch, 99% of contributions should go there. That way people could test your code before the next stable release.
-
-You can still send a pull request for `release` in the following scenarios:
-
-- Updating README.
-- Updating GitHub Actions.
-- Hotfixing a critical bug.
+Create pull requests for the `develop` branch. The `staging` branch is reserved for the automated upstream mirror.
 
 Project maintainers will test and can change your code before merging. To keep our workflow smooth, please ensure the following:
 

@@ -2,4 +2,4 @@
 
 ## Checklist:
 
-- [ ] I have read the [Contribution guidelines](https://github.com/SillyTavern/SillyTavern/blob/release/CONTRIBUTING.md).
+- [ ] I have read the [Contribution guidelines](https://github.com/EvilCroissant/SillyTavern/blob/develop/CONTRIBUTING.md).

@@ -419,6 +419,11 @@ let importFlashTimeout;
 export let isChatSaving = false;
 let firstRun = false;
 export let settingsReady = false;
+/**
+ * Raw settings response shared with extensions that need auxiliary settings data.
+ * Keeping this response avoids refetching the complete settings payload during startup.
+ */
+export let settingsData = null;
 let currentVersion = '0.0.0';
 export let displayVersion = 'SillyTavern';
 
@@ -1448,8 +1453,10 @@ export async function showMoreMessages(messagesToLoad = null) {
 
     const firstId = clamp(messageId - count, 0, Infinity);
     const messageElements = [];
+    const messageDepths = getMessageDepths(chat);
     chat.slice(firstId, messageId).forEach((message, id) => {
-        messageElements.push(updateMessageElement(message, { messageId: firstId + id }));
+        const currentId = firstId + id;
+        messageElements.push(updateMessageElement(message, { messageId: currentId, messageDepth: messageDepths[currentId] }));
     });
     // This could be faster: https://developer.mozilla.org/en-US/docs/Web/API/Element/insertAdjacentElement
     // Fallback to chatElement if the button isn't where it's expected to be.
@@ -1506,11 +1513,12 @@ export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = 
     const t1 = performance.now();
 
     const messages = targetChat.slice(startIndex);
+    const messageDepths = targetChat === chat ? getMessageDepths(targetChat) : null;
 
     if (messages.length > 0) {
         const newMessageElements = messages.map((message, offset) => {
             const i = startIndex + offset;
-            const messageElement = updateMessageElement(message, { messageId: i });
+            const messageElement = updateMessageElement(message, { messageId: i, messageDepth: messageDepths?.[i] });
 
             return messageElement[0];
         });
@@ -1795,9 +1803,10 @@ export async function sendTextareaMessage() {
  *   overrides. Merged on top of the default config.
  * @param {boolean} [isReasoning=false] - Whether the message is reasoning/thinking
  *   output (affects regex placement and some display rules).
+ * @param {number} [messageDepth] - Precomputed number of usable messages after this message.
  * @returns {string} Sanitized HTML string ready to assign to `innerHTML`.
  */
-export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, sanitizerOverrides = {}, isReasoning = false) {
+export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, sanitizerOverrides = {}, isReasoning = false, messageDepth = undefined) {
     if (!mes) {
         return '';
     }
@@ -1848,9 +1857,7 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         }
 
         const regexPlacement = getRegexPlacement();
-        const usableMessages = chat.map((x, index) => ({ message: x, index: index })).filter(x => !x.message.is_system);
-        const indexOf = usableMessages.findIndex(x => x.index === Number(messageId));
-        const depth = messageId >= 0 && indexOf !== -1 ? (usableMessages.length - indexOf - 1) : undefined;
+        const depth = messageDepth ?? getMessageDepth(messageId);
 
         mes = MessageFormatter.runStage(MessageFormatter.stage.BEFORE_REGEX, mes,
             { ch_name, isSystem, isUser, messageId, isReasoning },
@@ -1968,6 +1975,43 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
     mes = decodeStyleTags(mes, { prefix: '.mes_text ' });
 
     return mes;
+}
+
+/**
+ * Gets the number of non-system messages after a message.
+ * @param {number} messageId Message index in the active chat.
+ * @returns {number|undefined} Message depth, or undefined for invalid/system messages.
+ */
+function getMessageDepth(messageId) {
+    const numericMessageId = Number(messageId);
+    if (!Number.isInteger(numericMessageId) || numericMessageId < 0 || numericMessageId >= chat.length || chat[numericMessageId]?.is_system) {
+        return undefined;
+    }
+
+    let depth = 0;
+    for (let index = numericMessageId + 1; index < chat.length; index++) {
+        if (!chat[index]?.is_system) {
+            depth++;
+        }
+    }
+    return depth;
+}
+
+/**
+ * Calculates message depths for a chat in one reverse pass.
+ * @param {ChatMessage[]} messages Chat messages.
+ * @returns {(number|undefined)[]} Depth by message index.
+ */
+function getMessageDepths(messages) {
+    const depths = Array(messages.length);
+    let depth = 0;
+    for (let index = messages.length - 1; index >= 0; index--) {
+        if (!messages[index]?.is_system) {
+            depths[index] = depth;
+            depth++;
+        }
+    }
+    return depths;
 }
 
 /**
@@ -2518,9 +2562,10 @@ function updateMessageItemizedPromptButton(message, { messageId = chat.indexOf(m
  * @param {ChatMessage} message
  * @param {object} options Options
  * @param {number} [options.messageId] Message ID
+ * @param {number} [options.messageDepth] Precomputed number of usable messages after this message.
  * @returns {string} Formatted message HTML
  */
-function getMessageTextHTML(message, { messageId = chat.indexOf(message) }) {
+function getMessageTextHTML(message, { messageId = chat.indexOf(message), messageDepth = undefined }) {
     // if mes.extra.uses_system_ui is true, set an override on the sanitizer options
     /** @type {Partial<DOMPurify.Config>} */
     const sanitizerOverrides = message.extra?.uses_system_ui ? { MESSAGE_ALLOW_SYSTEM_UI: true } : {};
@@ -2533,6 +2578,7 @@ function getMessageTextHTML(message, { messageId = chat.indexOf(message) }) {
         messageId,
         sanitizerOverrides,
         false,
+        messageDepth,
     );
 }
 
@@ -2613,9 +2659,10 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
  * @param {number} [options.messageId=chat.length - 1] Force the message ID
  * @param {JQuery<HTMLElement>} [options.messageElement=messageTemplate.clone()] This message element will be updated with the ChatMessage object.
  * @param {SCROLL_BEHAVIOR} [options.adjustMediaScroll=SCROLL_BEHAVIOR.NONE] Scroll behavior option passed to appendMediaToMessage.
+ * @param {number} [options.messageDepth] Precomputed number of usable messages after this message.
  * @returns {JQuery<HTMLElement>} Rendered HTMLElement.
  */
-export function updateMessageElement(mes, { messageId = chat.length - 1, messageElement = messageTemplate.clone(), adjustMediaScroll = SCROLL_BEHAVIOR.NONE } = {}) {
+export function updateMessageElement(mes, { messageId = chat.length - 1, messageElement = messageTemplate.clone(), adjustMediaScroll = SCROLL_BEHAVIOR.NONE, messageDepth = undefined } = {}) {
     let avatarImg = getThumbnailUrl('persona', user_avatar);
 
     //for non-user messages
@@ -2639,7 +2686,7 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
     }
     const momentDate = timestampToMoment(mes.send_date);
     const timestamp = momentDate.isValid() ? momentDate.format('LL LT') : '';
-    const messageHTML = getMessageTextHTML(mes, { messageId });
+    const messageHTML = getMessageTextHTML(mes, { messageId, messageDepth });
     const bookmarkLink = mes?.extra?.bookmark_link;
     const tokenCount = mes.extra?.token_count;
     const { timerValue, timerTitle } = formatGenerationTimer(mes.gen_started, mes.gen_finished, mes.extra?.token_count, mes.extra?.reasoning_duration, mes.extra?.time_to_first_token);
@@ -3583,6 +3630,8 @@ class StreamingProcessor {
         this.images = [];
         /** @type {string?} */
         this.reasoningSignature = null;
+        /** @type {number|undefined} Cached message depth used by stream rendering. */
+        this.messageDepth = undefined;
     }
 
     /**
@@ -3632,6 +3681,7 @@ class StreamingProcessor {
         } else {
             await saveReply({ type: this.type, getMessage: text, fromStreaming: true });
             messageId = chat.length - 1;
+            this.messageDepth = getMessageDepth(messageId);
             await this.#checkDomElements(messageId, continueOnReasoning);
             this.markUIGenStarted();
         }
@@ -3720,6 +3770,7 @@ class StreamingProcessor {
                 messageId,
                 {},
                 false,
+                this.messageDepth,
             );
             if (this.messageTextDom instanceof HTMLElement) {
                 if (power_user.stream_fade_in) {
@@ -7303,7 +7354,7 @@ export async function renameCharacter(name = null, { silent = false, renameChats
 }
 
 async function renamePastChats(oldAvatar, newAvatar, newName) {
-    const pastChats = await getPastCharacterChats();
+    const pastChats = await getPastCharacterChats(null, { simple: true });
 
     for (const { file_name } of pastChats) {
         try {
@@ -7925,6 +7976,7 @@ export async function getSettings(initLoaderHandle = null) {
     }
 
     const data = await response.json();
+    settingsData = data;
     if (data.result != 'file not find' && data.settings) {
         settings = JSON.parse(data.settings);
         if (settings.username !== undefined && settings.username !== '') {
@@ -8498,18 +8550,20 @@ export async function getChatsFromFiles(data, isGroupChat) {
  * processes the received data, sorts it by the file name, and returns the sorted data.
  *
  * @param {null|number} [characterId=null] - When set, the function will use this character id instead of this_chid.
+ * @param {object} [options={}] - Request options.
+ * @param {boolean} [options.simple=false] - Only request file names when chat metadata is not needed.
  *
  * @returns {Promise<Array>} - An array containing metadata of all past chats of the character, sorted
  * in descending order by file name. Returns an empty array if the fetch request is unsuccessful or the
  * response is an object with an `error` property set to `true`.
  */
-export async function getPastCharacterChats(characterId = null) {
+export async function getPastCharacterChats(characterId = null, { simple = false } = {}) {
     characterId = characterId ?? parseInt(this_chid);
     if (!characters[characterId]) return [];
 
     const response = await fetch('/api/characters/chats', {
         method: 'POST',
-        body: JSON.stringify({ avatar_url: characters[characterId].avatar }),
+        body: JSON.stringify({ avatar_url: characters[characterId].avatar, simple }),
         headers: getRequestHeaders(),
     });
 
@@ -10856,7 +10910,7 @@ export async function deleteCharacter(characterKey, { deleteChats = true } = {})
         }
 
         const chid = characters.indexOf(character);
-        const pastChats = await getPastCharacterChats(chid);
+        const pastChats = await getPastCharacterChats(chid, { simple: true });
 
         const msg = { avatar_url: character.avatar, delete_chats: deleteChats };
 
@@ -11300,12 +11354,12 @@ jQuery(async function () {
         if (fromSlashCommand) {  // When called from `/delchat` command, don't re-open the history view.
             $('#options').hide();  // Hide option popup menu.
             await loaderHandle.hide();
-        } else {  // Open the history view again after 2 seconds (delay to avoid edge cases for deleting last chat).
+        } else {  // Re-open the history view on the next task after deletion completes.
             setTimeout(async function () {
                 $('#option_select_chat').trigger('click');
                 $('#options').hide();  // Hide option popup menu.
                 await loaderHandle.hide();
-            }, 2000);
+            }, 0);
         }
     }
 
