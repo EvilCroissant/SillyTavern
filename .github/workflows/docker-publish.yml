@@ -43,6 +43,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=tag
+            type=raw,value=develop
 
       - name: Log in to the Container registry
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
