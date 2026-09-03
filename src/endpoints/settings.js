@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+import fs, { promises as fsPromises } from 'node:fs';
 import path from 'node:path';
 
 import express from 'express';
@@ -51,24 +51,22 @@ function triggerAutoSave(handle) {
  * @param {string} fileExtension File extension
  * @returns {Array} Parsed files
  */
-function readAndParseFromDirectory(directoryPath, fileExtension = '.json') {
-    const files = fs
-        .readdirSync(directoryPath)
+async function readAndParseFromDirectory(directoryPath, fileExtension = '.json') {
+    const files = (await fsPromises.readdir(directoryPath))
         .filter(x => path.parse(x).ext == fileExtension)
         .sort();
 
-    const parsedFiles = [];
-
-    files.forEach(item => {
+    const parsedFiles = await Promise.all(files.map(async item => {
         try {
-            const file = fs.readFileSync(path.join(directoryPath, item), 'utf-8');
-            parsedFiles.push(fileExtension == '.json' ? JSON.parse(file) : file);
+            const file = await fsPromises.readFile(path.join(directoryPath, item), 'utf-8');
+            return fileExtension == '.json' ? JSON.parse(file) : file;
         } catch {
             // skip
+            return undefined;
         }
-    });
+    }));
 
-    return parsedFiles;
+    return parsedFiles.filter(item => item !== undefined);
 }
 
 /**
@@ -89,30 +87,35 @@ export function getSettingsBackupFilePrefix(handle) {
     return `settings_${handle}_`;
 }
 
-function readPresetsFromDirectory(directoryPath, options = {}) {
+async function readPresetsFromDirectory(directoryPath, options = {}) {
     const {
         sortFunction,
         removeFileExtension = false,
         fileExtension = '.json',
     } = options;
 
-    const files = fs.readdirSync(directoryPath).sort(sortFunction).filter(x => path.parse(x).ext == fileExtension);
-    const fileContents = [];
-    const fileNames = [];
-
-    files.forEach(item => {
+    const files = (await fsPromises.readdir(directoryPath)).sort(sortFunction).filter(x => path.parse(x).ext == fileExtension);
+    const presets = await Promise.all(files.map(async item => {
         try {
-            const file = fs.readFileSync(path.join(directoryPath, item), 'utf8');
+            const file = await fsPromises.readFile(path.join(directoryPath, item), 'utf8');
             JSON.parse(file);
-            fileContents.push(file);
-            fileNames.push(removeFileExtension ? item.replace(/\.[^/.]+$/, '') : item);
+            return {
+                file,
+                name: removeFileExtension ? item.replace(/\.[^/.]+$/, '') : item,
+            };
         } catch {
             // skip
             console.warn(`${item} is not a valid JSON`);
+            return undefined;
         }
-    });
+    }));
 
-    return { fileContents, fileNames };
+    const validPresets = presets.filter(item => item !== undefined);
+
+    return {
+        fileContents: validPresets.map(item => item.file),
+        fileNames: validPresets.map(item => item.name),
+    };
 }
 
 async function backupSettings() {
@@ -216,83 +219,88 @@ router.post('/save', function (request, response) {
 });
 
 // Wintermute's code
-router.post('/get', (request, response) => {
-    let settings;
+router.post('/get', async (request, response) => {
+    const directories = request.user.directories;
+
     try {
-        const pathToSettings = path.join(request.user.directories.root, SETTINGS_FILE);
-        settings = fs.readFileSync(pathToSettings, 'utf8');
-    } catch (e) {
+        const [
+            settings,
+            { fileContents: novelai_settings, fileNames: novelai_setting_names },
+            { fileContents: openai_settings, fileNames: openai_setting_names },
+            { fileContents: textgenerationwebui_presets, fileNames: textgenerationwebui_preset_names },
+            { fileContents: koboldai_settings, fileNames: koboldai_setting_names },
+            worldFiles,
+            themes,
+            movingUIPresets,
+            quickReplyPresets,
+            instruct,
+            context,
+            sysprompt,
+            reasoning,
+        ] = await Promise.all([
+            fsPromises.readFile(path.join(directories.root, SETTINGS_FILE), 'utf8'),
+            readPresetsFromDirectory(directories.novelAI_Settings, {
+                sortFunction: sortByName(directories.novelAI_Settings),
+                removeFileExtension: true,
+            }),
+            readPresetsFromDirectory(directories.openAI_Settings, {
+                sortFunction: sortByName(directories.openAI_Settings),
+                removeFileExtension: true,
+            }),
+            readPresetsFromDirectory(directories.textGen_Settings, {
+                sortFunction: sortByName(directories.textGen_Settings),
+                removeFileExtension: true,
+            }),
+            readPresetsFromDirectory(directories.koboldAI_Settings, {
+                sortFunction: sortByName(directories.koboldAI_Settings),
+                removeFileExtension: true,
+            }),
+            fsPromises.readdir(directories.worlds),
+            readAndParseFromDirectory(directories.themes),
+            readAndParseFromDirectory(directories.movingUI),
+            readAndParseFromDirectory(directories.quickreplies),
+            readAndParseFromDirectory(directories.instruct),
+            readAndParseFromDirectory(directories.context),
+            readAndParseFromDirectory(directories.sysprompt),
+            readAndParseFromDirectory(directories.reasoning),
+        ]);
+
+        const world_names = worldFiles
+            .filter(file => path.extname(file).toLowerCase() === '.json')
+            .sort((a, b) => a.localeCompare(b))
+            .map(item => path.parse(item).name);
+
+        return response.send({
+            settings,
+            koboldai_settings,
+            koboldai_setting_names,
+            world_names,
+            novelai_settings,
+            novelai_setting_names,
+            openai_settings,
+            openai_setting_names,
+            textgenerationwebui_presets,
+            textgenerationwebui_preset_names,
+            themes,
+            movingUIPresets,
+            quickReplyPresets,
+            instruct,
+            context,
+            sysprompt,
+            reasoning,
+            enable_extensions: ENABLE_EXTENSIONS,
+            enable_extensions_auto_update: ENABLE_EXTENSIONS_AUTO_UPDATE,
+            enable_accounts: ENABLE_ACCOUNTS,
+            request_compression: {
+                enabled: ENABLE_REQUEST_COMPRESSION,
+                minPayloadSize: REQUEST_COMPRESSION_MIN || 0,
+                maxPayloadSize: REQUEST_COMPRESSION_MAX || 0,
+                timeout: REQUEST_COMPRESSION_TIMEOUT || 0,
+            },
+        });
+    } catch (error) {
         return response.sendStatus(500);
     }
-
-    // NovelAI Settings
-    const { fileContents: novelai_settings, fileNames: novelai_setting_names }
-        = readPresetsFromDirectory(request.user.directories.novelAI_Settings, {
-            sortFunction: sortByName(request.user.directories.novelAI_Settings),
-            removeFileExtension: true,
-        });
-
-    // OpenAI Settings
-    const { fileContents: openai_settings, fileNames: openai_setting_names }
-        = readPresetsFromDirectory(request.user.directories.openAI_Settings, {
-            sortFunction: sortByName(request.user.directories.openAI_Settings), removeFileExtension: true,
-        });
-
-    // TextGenerationWebUI Settings
-    const { fileContents: textgenerationwebui_presets, fileNames: textgenerationwebui_preset_names }
-        = readPresetsFromDirectory(request.user.directories.textGen_Settings, {
-            sortFunction: sortByName(request.user.directories.textGen_Settings), removeFileExtension: true,
-        });
-
-    //Kobold
-    const { fileContents: koboldai_settings, fileNames: koboldai_setting_names }
-        = readPresetsFromDirectory(request.user.directories.koboldAI_Settings, {
-            sortFunction: sortByName(request.user.directories.koboldAI_Settings), removeFileExtension: true,
-        });
-
-    const worldFiles = fs
-        .readdirSync(request.user.directories.worlds)
-        .filter(file => path.extname(file).toLowerCase() === '.json')
-        .sort((a, b) => a.localeCompare(b));
-    const world_names = worldFiles.map(item => path.parse(item).name);
-
-    const themes = readAndParseFromDirectory(request.user.directories.themes);
-    const movingUIPresets = readAndParseFromDirectory(request.user.directories.movingUI);
-    const quickReplyPresets = readAndParseFromDirectory(request.user.directories.quickreplies);
-
-    const instruct = readAndParseFromDirectory(request.user.directories.instruct);
-    const context = readAndParseFromDirectory(request.user.directories.context);
-    const sysprompt = readAndParseFromDirectory(request.user.directories.sysprompt);
-    const reasoning = readAndParseFromDirectory(request.user.directories.reasoning);
-
-    response.send({
-        settings,
-        koboldai_settings,
-        koboldai_setting_names,
-        world_names,
-        novelai_settings,
-        novelai_setting_names,
-        openai_settings,
-        openai_setting_names,
-        textgenerationwebui_presets,
-        textgenerationwebui_preset_names,
-        themes,
-        movingUIPresets,
-        quickReplyPresets,
-        instruct,
-        context,
-        sysprompt,
-        reasoning,
-        enable_extensions: ENABLE_EXTENSIONS,
-        enable_extensions_auto_update: ENABLE_EXTENSIONS_AUTO_UPDATE,
-        enable_accounts: ENABLE_ACCOUNTS,
-        request_compression: {
-            enabled: ENABLE_REQUEST_COMPRESSION,
-            minPayloadSize: REQUEST_COMPRESSION_MIN || 0,
-            maxPayloadSize: REQUEST_COMPRESSION_MAX || 0,
-            timeout: REQUEST_COMPRESSION_TIMEOUT || 0,
-        },
-    });
 });
 
 router.post('/get-snapshots', async (request, response) => {
