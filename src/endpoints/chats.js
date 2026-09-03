@@ -480,11 +480,12 @@ async function checkChatIntegrity(filePath, integritySlug) {
  * @param {object} additionalData - Additional data to include in the result
  * @param {boolean} withMetadata - Whether to read chat metadata
  * @param {ChatMatchFunction|null} matcher - Optional function to match messages
+ * @param {import('node:fs').Stats|null} fileStats - Optional pre-read file metadata
  * @returns {Promise<ChatInfo>}
  *
  * @typedef {(message: string) => boolean} ChatMatchFunction
  */
-export async function getChatInfo(pathToFile, additionalData = {}, withMetadata = false, matcher = null) {
+export async function getChatInfo(pathToFile, additionalData = {}, withMetadata = false, matcher = null, fileStats = null) {
     const parsedPath = path.parse(pathToFile);
     const hasMatcher = (typeof matcher === 'function');
 
@@ -494,14 +495,16 @@ export async function getChatInfo(pathToFile, additionalData = {}, withMetadata 
         return { match: false };
     };
 
-    let stats;
-    try {
-        stats = await fs.promises.stat(pathToFile);
-    } catch (error) {
-        if (error.code === 'ENOENT') {
-            return chatVanished();
+    let stats = fileStats;
+    if (!stats) {
+        try {
+            stats = await fs.promises.stat(pathToFile);
+        } catch (error) {
+            if (error.code === 'ENOENT') {
+                return chatVanished();
+            }
+            throw error;
         }
-        throw error;
     }
 
     const chatData = {

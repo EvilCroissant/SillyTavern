@@ -9,6 +9,43 @@ export const router = express.Router();
 const backupScanConcurrency = 8;
 
 /**
+ * @typedef {{version: string, info: Promise<import('./chats.js').ChatInfo>}} BackupInfoCacheEntry
+ */
+
+/** @type {Map<string, Map<string, BackupInfoCacheEntry>>} */
+const backupInfoCache = new Map();
+
+/**
+ * Gets the cache bucket for one user's backup directory.
+ * @param {string} directory Backup directory
+ * @returns {Map<string, BackupInfoCacheEntry>}
+ */
+function getBackupInfoCache(directory) {
+    let cache = backupInfoCache.get(directory);
+    if (!cache) {
+        cache = new Map();
+        backupInfoCache.set(directory, cache);
+    }
+    return cache;
+}
+
+/**
+ * Removes one backup's cached metadata.
+ * @param {string} filePath Absolute path to the backup
+ */
+function removeCachedBackupInfo(filePath) {
+    const directory = path.dirname(filePath);
+    const cache = backupInfoCache.get(directory);
+    if (!cache) {
+        return;
+    }
+    cache.delete(path.basename(filePath));
+    if (cache.size === 0) {
+        backupInfoCache.delete(directory);
+    }
+}
+
+/**
  * Scans a large backup directory without serializing I/O or opening all files at once.
  * @template T, R
  * @param {T[]} items Items to process
@@ -33,15 +70,77 @@ async function mapBackupsWithConcurrency(items, mapper) {
     return results;
 }
 
+/**
+ * Gets backup metadata from a versioned in-memory cache. The file's size and
+ * modification time are checked on every request so external edits are visible
+ * immediately while unchanged backups avoid a full JSONL scan.
+ * @param {string} filePath Absolute path to the backup
+ * @returns {Promise<import('./chats.js').ChatInfo>}
+ */
+async function getCachedBackupInfo(filePath) {
+    const directory = path.dirname(filePath);
+    const fileName = path.basename(filePath);
+    const cache = getBackupInfoCache(directory);
+    let stats;
+    try {
+        stats = await fsPromises.stat(filePath);
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            removeCachedBackupInfo(filePath);
+            return { match: false };
+        }
+        throw error;
+    }
+
+    const version = `${stats.size}:${stats.mtimeMs}`;
+    const cached = cache.get(fileName);
+    if (cached?.version === version) {
+        return cached.info;
+    }
+
+    const entry = { version, info: getChatInfo(filePath, {}, false, null, stats) };
+    cache.set(fileName, entry);
+    entry.info.catch(() => {
+        if (cache.get(fileName) === entry) {
+            removeCachedBackupInfo(filePath);
+        }
+    });
+    return entry.info;
+}
+
+/**
+ * Drops entries for files deleted outside this process and keeps the cache
+ * bounded by the current directory contents.
+ * @param {string} directory Backup directory
+ * @param {string[]} fileNames Current backup filenames
+ */
+function pruneBackupInfoCache(directory, fileNames) {
+    const cache = backupInfoCache.get(directory);
+    if (!cache) {
+        return;
+    }
+    const currentFiles = new Set(fileNames);
+    for (const fileName of cache.keys()) {
+        if (!currentFiles.has(fileName)) {
+            cache.delete(fileName);
+        }
+    }
+    if (cache.size === 0) {
+        backupInfoCache.delete(directory);
+    }
+}
+
 router.post('/chat/get', async (request, response) => {
     try {
         const backupFiles = await fsPromises
             .readdir(request.user.directories.backups, { withFileTypes: true })
             .then(d => d.filter(d => d.isFile() && path.extname(d.name) === '.jsonl' && d.name.startsWith(CHAT_BACKUPS_PREFIX)).map(d => d.name));
 
+        pruneBackupInfoCache(request.user.directories.backups, backupFiles);
+
         const backupModels = await mapBackupsWithConcurrency(backupFiles, async (name) => {
             const filePath = path.join(request.user.directories.backups, name);
-            return getChatInfo(filePath);
+            return getCachedBackupInfo(filePath);
         });
 
         return response.json(backupModels.filter(info => info?.file_name));
@@ -66,6 +165,7 @@ router.post('/chat/delete', async (request, response) => {
         }
 
         await fsPromises.unlink(filePath);
+        removeCachedBackupInfo(filePath);
         return response.sendStatus(200);
     } catch (error) {
         console.error(error);
