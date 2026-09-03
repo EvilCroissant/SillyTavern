@@ -62,10 +62,25 @@ describe('getChatInfo', () => {
 
     test('applies the matcher against message content', async () => {
         fs.writeFileSync(chatFile, makeChatJsonl());
-        const matching = await chats.getChatInfo(chatFile, {}, false, lines => lines.some(l => l.includes('Second')));
+        const matching = await chats.getChatInfo(chatFile, {}, false, line => line.includes('Second'));
         expect(matching.match).toBe(true);
-        const nonMatching = await chats.getChatInfo(chatFile, {}, false, lines => lines.some(l => l.includes('nope')));
+        const nonMatching = await chats.getChatInfo(chatFile, {}, false, line => line.includes('nope'));
         expect(nonMatching.match).toBe(false);
+    });
+
+    test('evaluates each message once until a match is found', async () => {
+        const lines = [JSON.stringify({ chat_metadata: {} })];
+        for (let i = 0; i < 5_000; i++) {
+            lines.push(JSON.stringify({ name: 'Char', mes: i === 4_999 ? 'needle' : `message ${i}` }));
+        }
+        fs.writeFileSync(chatFile, lines.join('\n'));
+
+        const matcher = jest.fn(text => text.includes('needle'));
+        const info = await chats.getChatInfo(chatFile, {}, false, matcher);
+
+        expect(info.match).toBe(true);
+        expect(matcher).toHaveBeenCalledTimes(5_000);
+        expect(matcher).toHaveBeenLastCalledWith('needle');
     });
 
     test('resolves without match when the file was already deleted', async () => {
@@ -120,10 +135,10 @@ describe('getChatInfo', () => {
 
     test('matcher still applies to intact messages when the last line is unparseable', async () => {
         fs.writeFileSync(chatFile, makeChatJsonl() + '\n' + '{"broken');
-        const matching = await chats.getChatInfo(chatFile, {}, false, lines => lines.some(l => l.includes('Second')));
+        const matching = await chats.getChatInfo(chatFile, {}, false, line => line.includes('Second'));
         expect(matching.match).toBe(true);
         expect(matching.file_name).toBe('chat.jsonl');
-        const nonMatching = await chats.getChatInfo(chatFile, {}, false, lines => lines.some(l => l.includes('nope')));
+        const nonMatching = await chats.getChatInfo(chatFile, {}, false, line => line.includes('nope'));
         expect(nonMatching.match).toBe(false);
         expect(nonMatching.file_name).toBe('chat.jsonl');
     });

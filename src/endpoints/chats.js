@@ -2,7 +2,6 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import process from 'node:process';
 
 import express from 'express';
 import sanitize from 'sanitize-filename';
@@ -15,9 +14,9 @@ import {
     humanizedDateTime,
     tryParse,
     generateTimestamp,
-    removeOldBackups,
+    removeOldBackupsAsync,
     formatBytes,
-    tryWriteFileSync,
+    tryWriteFileAsync,
     tryReadFileSync,
     tryDeleteFileAsync,
     readFirstLine,
@@ -88,7 +87,7 @@ export function getBackupKey(name) {
  * @param {string} backupPrefix The file prefix. Typically CHAT_BACKUPS_PREFIX.
  * @returns
  */
-function backupChat(directory, name, data, backupPrefix = CHAT_BACKUPS_PREFIX) {
+async function backupChat(directory, name, data, backupPrefix = CHAT_BACKUPS_PREFIX) {
     try {
         if (!isBackupEnabled) { return; }
         if (!fs.existsSync(directory)) {
@@ -96,14 +95,16 @@ function backupChat(directory, name, data, backupPrefix = CHAT_BACKUPS_PREFIX) {
         }
         name = getBackupKey(name);
 
-        const backupFile = path.join(directory, `${backupPrefix}${name}_${generateTimestamp()}.jsonl`);
+        await queueBackupDirectory(directory, async () => {
+            const backupFile = path.join(directory, `${backupPrefix}${name}_${generateTimestamp()}.jsonl`);
 
-        tryWriteFileSync(backupFile, data);
-        removeOldBackups(directory, `${backupPrefix}${name}_`);
-        if (isNaN(maxTotalChatBackups) || maxTotalChatBackups < 0) {
-            return;
-        }
-        removeOldBackups(directory, backupPrefix, maxTotalChatBackups);
+            await tryWriteFileAsync(backupFile, data);
+            await removeOldBackupsAsync(directory, `${backupPrefix}${name}_`);
+            if (isNaN(maxTotalChatBackups) || maxTotalChatBackups < 0) {
+                return;
+            }
+            await removeOldBackupsAsync(directory, backupPrefix, maxTotalChatBackups);
+        });
     } catch (err) {
         console.error(`Could not backup chat for ${name}`, err);
     }
@@ -147,11 +148,72 @@ function getPreviewMessage(lastMessage) {
         : lastMessage;
 }
 
-process.on('exit', () => {
-    for (const func of backupFunctions.values()) {
-        func.flush();
+/**
+ * Flushes pending throttled chat backups before a graceful process shutdown.
+ * @returns {Promise<void>}
+ */
+export async function flushChatBackups() {
+    const results = await Promise.allSettled([...backupFunctions.values()].map((func) => Promise.resolve().then(() => func.flush())));
+    for (const result of results) {
+        if (result.status === 'rejected') {
+            console.error('Could not flush chat backup', result.reason);
+        }
     }
-});
+}
+
+/** @type {Map<string, Promise<void>>} */
+const chatSaveQueues = new Map();
+
+/** @type {Map<string, Promise<void>>} */
+const backupDirectoryQueues = new Map();
+
+/**
+ * Runs an operation after earlier operations for the same resource complete.
+ * @param {Map<string, Promise<void>>} queues Resource-specific operation queues
+ * @param {string} queueKey Resource key
+ * @param {() => Promise<void>} operation Operation to run
+ * @returns {Promise<void>}
+ */
+function queueOperation(queues, queueKey, operation) {
+    const previous = queues.get(queueKey) ?? Promise.resolve();
+    const current = previous.catch(() => { }).then(operation);
+    queues.set(queueKey, current);
+
+    void current.then(
+        () => {
+            if (queues.get(queueKey) === current) {
+                queues.delete(queueKey);
+            }
+        },
+        () => {
+            if (queues.get(queueKey) === current) {
+                queues.delete(queueKey);
+            }
+        },
+    );
+
+    return current;
+}
+
+/**
+ * Serializes the integrity check and write for one chat file while allowing unrelated chats to save in parallel.
+ * @param {string} filePath Target chat file path
+ * @param {() => Promise<void>} operation Save operation
+ * @returns {Promise<void>}
+ */
+function queueChatSave(filePath, operation) {
+    return queueOperation(chatSaveQueues, path.resolve(filePath), operation);
+}
+
+/**
+ * Serializes backup writes and quota cleanup per backup directory.
+ * @param {string} directory Backup directory path
+ * @param {() => Promise<void>} operation Backup operation
+ * @returns {Promise<void>}
+ */
+function queueBackupDirectory(directory, operation) {
+    return queueOperation(backupDirectoryQueues, path.resolve(directory), operation);
+}
 
 /**
  * Imports a chat from Ooba's format.
@@ -420,7 +482,7 @@ async function checkChatIntegrity(filePath, integritySlug) {
  * @param {ChatMatchFunction|null} matcher - Optional function to match messages
  * @returns {Promise<ChatInfo>}
  *
- * @typedef {(textArray: string[]) => boolean} ChatMatchFunction
+ * @typedef {(message: string) => boolean} ChatMatchFunction
  */
 export async function getChatInfo(pathToFile, additionalData = {}, withMetadata = false, matcher = null) {
     const parsedPath = path.parse(pathToFile);
@@ -486,7 +548,6 @@ export async function getChatInfo(pathToFile, additionalData = {}, withMetadata 
         let lastLine;
         let itemCounter = 0;
         let hasAnyMatch = false;
-        let matchBuffer = [];
         rl.on('line', (line) => {
             if (withMetadata && itemCounter === 0) {
                 const jsonData = tryParse(line);
@@ -494,15 +555,11 @@ export async function getChatInfo(pathToFile, additionalData = {}, withMetadata 
                     chatData.chat_metadata = jsonData.chat_metadata;
                 }
             }
-            // Skip matching if any match was already found
+            // Stop parsing messages for matching once all search terms have been found.
             if (hasMatcher && !hasAnyMatch && itemCounter > 0) {
                 const jsonData = tryParse(line);
                 if (jsonData) {
-                    matchBuffer.push(jsonData.mes || '');
-                    if (matcher(matchBuffer)) {
-                        hasAnyMatch = true;
-                        matchBuffer = [];
-                    }
+                    hasAnyMatch = matcher(jsonData.mes || '');
                 }
             }
             itemCounter++;
@@ -564,14 +621,17 @@ class IntegrityMismatchError extends Error {
 export async function trySaveChat(chatData, filePath, skipIntegrityCheck = false, handle, cardName, backupDirectory) {
     const jsonlData = chatData?.map(m => JSON.stringify(m)).join('\n');
 
-    const doIntegrityCheck = (checkIntegrity && !skipIntegrityCheck);
-    const chatIntegritySlug = doIntegrityCheck ? chatData?.[0]?.chat_metadata?.integrity : undefined;
+    await queueChatSave(filePath, async () => {
+        const doIntegrityCheck = (checkIntegrity && !skipIntegrityCheck);
+        const chatIntegritySlug = doIntegrityCheck ? chatData?.[0]?.chat_metadata?.integrity : undefined;
 
-    if (chatIntegritySlug && !await checkChatIntegrity(filePath, chatIntegritySlug)) {
-        throw new IntegrityMismatchError(`Chat integrity check failed for "${filePath}". The expected integrity slug was "${chatIntegritySlug}".`);
-    }
-    tryWriteFileSync(filePath, jsonlData);
-    getBackupFunction(handle, cardName)(backupDirectory, cardName, jsonlData);
+        if (chatIntegritySlug && !await checkChatIntegrity(filePath, chatIntegritySlug)) {
+            throw new IntegrityMismatchError(`Chat integrity check failed for "${filePath}". The expected integrity slug was "${chatIntegritySlug}".`);
+        }
+
+        await tryWriteFileAsync(filePath, jsonlData);
+        await getBackupFunction(handle, cardName)(backupDirectory, cardName, jsonlData);
+    });
 }
 
 router.post('/save', validateAvatarUrlMiddleware, async function (request, response) {
@@ -1042,6 +1102,19 @@ router.post('/search', validateAvatarUrlMiddleware, async function (request, res
         const fragments = query ? query.trim().toLowerCase().split(/\s+/).filter(x => x) : [];
 
         /** @type {ChatMatchFunction} */
+        const createTextMatcher = () => {
+            const unmatchedFragments = new Set(fragments);
+            return (text) => {
+                const normalizedText = String(text ?? '').toLowerCase();
+                for (const fragment of unmatchedFragments) {
+                    if (normalizedText.includes(fragment)) {
+                        unmatchedFragments.delete(fragment);
+                    }
+                }
+                return unmatchedFragments.size === 0;
+            };
+        };
+
         const hasTextMatch = (textArray) => {
             if (fragments.length === 0) {
                 return true;
@@ -1049,8 +1122,10 @@ router.post('/search', validateAvatarUrlMiddleware, async function (request, res
             return fragments.every(fragment => textArray.some(text => String(text ?? '').toLowerCase().includes(fragment)));
         };
 
-        const matcher = query ? hasTextMatch : null;
-        const chatInfos = await mapWithConcurrency(chatFiles, (chatFile) => getChatInfo(chatFile, {}, false, matcher), chatScanConcurrency);
+        const chatInfos = await mapWithConcurrency(chatFiles, (chatFile) => {
+            const matcher = query ? createTextMatcher() : null;
+            return getChatInfo(chatFile, {}, false, matcher);
+        }, chatScanConcurrency);
 
         for (const chatInfo of chatInfos) {
             const hasMatch = chatInfo.match || hasTextMatch([chatInfo.file_id ?? '']);

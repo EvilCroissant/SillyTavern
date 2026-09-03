@@ -75,4 +75,18 @@ describe('chat backups', () => {
         expect(backupFiles.some(f => f.startsWith(`chat_${keyA}_`))).toBe(true);
         expect(backupFiles.some(f => f.startsWith(`chat_${keyB}_`))).toBe(true);
     });
+
+    test('flushes a pending throttled backup with the most recent chat data', async () => {
+        const backupsDir = path.join(workDir, 'flush-backups');
+        const chatFile = path.join(workDir, 'flush-chat.jsonl');
+        fs.mkdirSync(backupsDir, { recursive: true });
+
+        await chats.trySaveChat(makeChat('first'), chatFile, true, 'flush-user', 'Flush Card', backupsDir);
+        await chats.trySaveChat(makeChat('second'), chatFile, true, 'flush-user', 'Flush Card', backupsDir);
+        await chats.flushChatBackups();
+
+        const backupFiles = fs.readdirSync(backupsDir);
+        expect(backupFiles).toHaveLength(1);
+        expect(fs.readFileSync(path.join(backupsDir, backupFiles[0]), 'utf8')).toContain('second');
+    });
 });

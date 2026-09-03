@@ -166,6 +166,7 @@ class BackupsBrowser {
 
         /** @type {import('../../src/endpoints/chats.js').ChatInfo[]} */
         const backupsList = await response.json();
+        const listFragment = document.createDocumentFragment();
 
         for (const backup of backupsList.sort((a, b) => sortMoments(timestampToMoment(a.last_mes), timestampToMoment(b.last_mes)))) {
             const listItem = document.createElement('div');
@@ -214,8 +215,10 @@ class BackupsBrowser {
             listItem.appendChild(backupInfo);
             listItem.appendChild(actionsList);
 
-            this.#backupsListElement.appendChild(listItem);
+            listFragment.appendChild(listItem);
         }
+
+        this.#backupsListElement.appendChild(listFragment);
     }
 
     closeBackups() {

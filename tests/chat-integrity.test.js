@@ -164,4 +164,19 @@ describe('trySaveChat integrity check', () => {
         await save(newChat);
         expect(fs.readFileSync(chatFile, 'utf8')).toBe(toJsonl(newChat));
     });
+
+    test('serializes a forced save ahead of a queued save so the latter observes the new integrity slug', async () => {
+        fs.writeFileSync(chatFile, toJsonl(makeChat(SLUG)));
+
+        const forcedChat = makeChat(OTHER_SLUG);
+        forcedChat[1].mes = 'x'.repeat(5 * 1024 * 1024);
+        const staleChat = makeChat(SLUG);
+
+        const forcedSave = save(forcedChat, { force: true });
+        const staleSave = save(staleChat);
+
+        await expect(staleSave).rejects.toThrow(/integrity check failed/i);
+        await forcedSave;
+        expect(fs.readFileSync(chatFile, 'utf8')).toBe(toJsonl(forcedChat));
+    });
 });

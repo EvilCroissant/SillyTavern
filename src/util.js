@@ -20,7 +20,7 @@ import chalk from 'chalk';
 import bytes from 'bytes';
 import { LOG_LEVELS, CHAT_COMPLETION_SOURCES, MEDIA_REQUEST_TYPE } from './constants.js';
 import { serverDirectory } from './server-directory.js';
-import { sync as writeFileAtomicSync } from 'write-file-atomic';
+import writeFileAtomic, { sync as writeFileAtomicSync } from 'write-file-atomic';
 import { isFirefox } from './express-common.js';
 
 /**
@@ -670,6 +670,29 @@ export function removeOldBackups(directory, prefix, limit = null) {
             fs.unlinkSync(oldest);
         }
     }
+}
+
+/**
+ * Remove old backups without blocking the event loop.
+ * @param {string} directory The root directory to remove backups from.
+ * @param {string} prefix File prefix to filter backups by.
+ * @param {number?} limit Maximum number of backups to keep. If null, the limit is determined by the `backups.common.numberOfBackups` config value.
+ */
+export async function removeOldBackupsAsync(directory, prefix, limit = null) {
+    const maxBackups = limit ?? Number(getConfigValue('backups.common.numberOfBackups', 50, 'number'));
+    let files = (await fs.promises.readdir(directory)).filter(file => file.startsWith(prefix));
+    if (files.length <= maxBackups) {
+        return;
+    }
+
+    files = await Promise.all(files.map(async (file) => {
+        const filePath = path.join(directory, file);
+        const stats = await fs.promises.stat(filePath);
+        return { filePath, mtimeMs: stats.mtimeMs };
+    }));
+    files.sort((a, b) => a.mtimeMs - b.mtimeMs);
+
+    await Promise.all(files.slice(0, files.length - maxBackups).map(file => fs.promises.unlink(file.filePath)));
 }
 
 /**
@@ -1518,6 +1541,18 @@ export function tryWriteFileSync(filePath, data) {
         fs.mkdirSync(directory, { recursive: true });
     }
     writeFileAtomicSync(filePath, data, 'utf8');
+}
+
+/**
+ * Writes to a file atomically without blocking the event loop, creating parent directories if needed.
+ * @param {string} filePath
+ * @param {string} data
+ * @returns {Promise<void>}
+ */
+export async function tryWriteFileAsync(filePath, data) {
+    const directory = path.dirname(filePath);
+    await fs.promises.mkdir(directory, { recursive: true });
+    await writeFileAtomic(filePath, data, 'utf8');
 }
 
 /**

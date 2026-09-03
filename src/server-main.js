@@ -68,6 +68,7 @@ import { UPLOADS_DIRECTORY } from './constants.js';
 // Routers
 import { router as usersPublicRouter } from './endpoints/users-public.js';
 import { init as statsInit, onExit as statsOnExit } from './endpoints/stats.js';
+import { flushChatBackups } from './endpoints/chats.js';
 import { checkForNewContent } from './endpoints/content-manager.js';
 import { init as settingsInit } from './endpoints/settings.js';
 import { redirectDeprecatedEndpoints, ServerStartup, setupPrivateEndpoints } from './server-startup.js';
@@ -321,6 +322,7 @@ async function preSetupTasks() {
         if (typeof cleanupPlugins === 'function') {
             await cleanupPlugins();
         }
+        await flushChatBackups();
         diskCache.dispose();
         setWindowTitle(consoleTitle);
         process.exit();
