@@ -2613,6 +2613,7 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
         return chat.length - 1;
     })();
 
+    const previousLastMessage = chatElement[0].querySelector('.mes.last_mes');
     let messageElement;
 
     if (type === 'swipe') {
@@ -2635,13 +2636,22 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
             chatElement.append(messageElement);
         }
     }
+    const messageDom = messageElement[0];
+    const isNewLastMessage = type !== 'swipe' && (
+        (insertAfter === null && insertBefore === null) || !messageDom.nextElementSibling
+    );
 
+    if (isNewLastMessage && previousLastMessage !== messageDom) {
+        previousLastMessage?.classList.remove('last_mes');
+        messageDom.classList.add('last_mes');
+    }
 
-    //last_mes should always be updated.
-    chatElement.find('.mes').removeClass('last_mes');
-    chatElement.find('.mes').last().addClass('last_mes');
-
-    if (showSwipes) refreshSwipeButtons();
+    if (showSwipes) {
+        const swipeMessages = isNewLastMessage && previousLastMessage
+            ? $([previousLastMessage, messageDom])
+            : messageElement;
+        refreshSwipeButtonsForMessages(swipeMessages);
+    }
     // Don't scroll if not inserting last
     if (!insertAfter && !insertBefore && scroll) {
         scrollChatToBottom({ waitForFrame: true });
@@ -9348,36 +9358,36 @@ export function getOverswipeBehavior(messageId, message = undefined) {
  * @returns
  */
 export function refreshSwipeButtons(updateCounters = false, fade = true) {
-    //Never show swipe buttons on an empty chat.
-    if (chat?.length === 0) return false;
+    // Non-messages can appear in chat. '.mes' is required.
+    return refreshSwipeButtonsForMessages(chatElement.children('.mes[mesid]'), updateCounters, fade);
+}
 
-    //If swipes are disabled or hidden, hide all swipe buttons.
+/**
+ * Refreshes swipe controls for already-selected message elements.
+ * @param {JQuery<HTMLElement>} messageElements Message elements to update.
+ * @param {boolean} [updateCounters=false] Whether to update the swipe counters.
+ * @param {boolean} [fade=true] Whether swipe buttons should fade in and out.
+ * @returns {void}
+ */
+function refreshSwipeButtonsForMessages(messageElements, updateCounters = false, fade = true) {
+    if (chat?.length === 0) return;
+
     if (!isSwipingAllowed()) {
         $('body').addClass('hideAllSwipeButtons');
         return;
-        //Don't hide all swipe buttons.
-    } else {
-        //CSS will hide all messages.
-        $('body').removeClass('hideAllSwipeButtons');
     }
-    //Non-messages can appear in chat. '.mes' is required.
-    const messageElements = chatElement.children('.mes[mesid]');
 
-    const firstDisplayedMesId = Number(messageElements.first().attr('mesid'));
+    $('body').removeClass('hideAllSwipeButtons');
 
-    //Group each message.
-    messageElements.each((index, div) => {
-        //This assumes the messages are in order and their Id's are accurate.
-        const messageId = firstDisplayedMesId + index;
-        //Number($(div).attr('mesid')); Would not misscount due to a missing div, but is much slower.
-
+    messageElements.each((_, div) => {
+        const messageId = Number(div.getAttribute('mesid'));
         const message = chat[messageId];
 
-        //Chevrons should not fade-in during printMessages. //https://github.com/SillyTavern/SillyTavern/pull/4712#issuecomment-3539315919
+        // Chevrons should not fade-in during printMessages. https://github.com/SillyTavern/SillyTavern/pull/4712#issuecomment-3539315919
         div.classList.toggle('fade', fade);
 
         if (isMessageSwipeable(messageId, message)) {
-            //If a right swipe would trigger a generation or loop to the first swipe.
+            // If a right swipe would trigger a generation or loop to the first swipe.
             const isLastSwipe = (message?.swipes?.length ?? 1) - 1 <= (message?.swipe_id ?? 0);
             const hasSwipes = (message?.swipes?.length > 1);
             const overswipe = getOverswipeBehavior(messageId, message);
@@ -9387,21 +9397,21 @@ export function refreshSwipeButtons(updateCounters = false, fade = true) {
             // Chevrons should always be shown on pristine greetings: https://github.com/SillyTavern/SillyTavern/pull/4712#issuecomment-3557893373
             const pristineGreeting = overswipe == OVERSWIPE_BEHAVIOR.PRISTINE_GREETING;
 
-            //The swipe button will be shown if an overswipe would trigger REGENERATE or EDIT_GENERATE.
+            // The swipe button will be shown if an overswipe would trigger REGENERATE or EDIT_GENERATE.
             const isOverswipeable = isLastSwipe &&
                 overswipe == OVERSWIPE_BEHAVIOR.REGENERATE ||
                 overswipe == OVERSWIPE_BEHAVIOR.EDIT_GENERATE;
 
             div.classList.toggle('last_swipe', isOverswipeable);
 
-            //If there's only one swipe, the left arrow should not be shown.
+            // If there's only one swipe, the left arrow should not be shown.
             div.classList.toggle('swipes_visible', hasSwipes || pristineGreeting);
             swipePickerButton.toggle(canOpenSwipePicker);
 
-            //updateSwipeCounter does not need to be awaited, It can run a bit later.
+            // updateSwipeCounter does not need to be awaited; it can run later.
             if (updateCounters) updateSwipeCounter(messageId, { message, messageElement: $(div) });
         } else {
-            //Hide all messages that are not swipeable.
+            // Hide messages that are not swipeable.
             div.classList.remove('swipes_visible', 'last_swipe');
             $(div).find('.mes_swipe_picker').toggle(canOpenSwipePickerForMessage(messageId));
         }

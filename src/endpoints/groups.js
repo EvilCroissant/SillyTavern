@@ -6,10 +6,11 @@ import express from 'express';
 import sanitize from 'sanitize-filename';
 import { sync as writeFileAtomicSync, default as writeFileAtomic } from 'write-file-atomic';
 
-import { color, tryParse } from '../util.js';
+import { color, mapWithConcurrency, tryParse } from '../util.js';
 import { getFileNameValidationFunction } from '../middleware/validateFileName.js';
 
 export const router = express.Router();
+const groupListScanConcurrency = 8;
 
 /**
  * Warns if group data contains deprecated metadata keys and removes them.
@@ -110,47 +111,87 @@ export async function migrateGroupChatsMetadataFormat(userDirectories) {
     }
 }
 
-router.post('/all', (request, response) => {
-    const groups = [];
-
-    if (!fs.existsSync(request.user.directories.groups)) {
-        fs.mkdirSync(request.user.directories.groups);
+router.post('/all', async (request, response, next) => {
+    let groupEntries;
+    let chatEntries;
+    try {
+        await fsPromises.mkdir(request.user.directories.groups, { recursive: true });
+        [groupEntries, chatEntries] = await Promise.all([
+            fsPromises.readdir(request.user.directories.groups, { withFileTypes: true }),
+            fsPromises.readdir(request.user.directories.groupChats, { withFileTypes: true }),
+        ]);
+    } catch (error) {
+        return next(error);
     }
+    const groupFiles = groupEntries.filter(entry => path.extname(entry.name) === '.json').map(entry => entry.name);
+    const chatFiles = chatEntries.filter(entry => path.extname(entry.name) === '.jsonl').map(entry => entry.name);
 
-    const files = fs.readdirSync(request.user.directories.groups).filter(x => path.extname(x) === '.json');
-    const chats = fs.readdirSync(request.user.directories.groupChats).filter(x => path.extname(x) === '.jsonl');
-
-    files.forEach(function (file) {
+    const parsedGroups = await mapWithConcurrency(groupFiles, async (file) => {
         try {
             const filePath = path.join(request.user.directories.groups, file);
-            const fileContents = fs.readFileSync(filePath, 'utf8');
+            const [fileContents, groupStat] = await Promise.all([
+                fsPromises.readFile(filePath, 'utf8'),
+                fsPromises.stat(filePath),
+            ]);
             const group = JSON.parse(fileContents);
-            const groupStat = fs.statSync(filePath);
             group.date_added = groupStat.birthtimeMs;
             group.create_date = new Date(groupStat.birthtimeMs).toISOString();
-
-            let chat_size = 0;
-            let date_last_chat = 0;
-
-            if (Array.isArray(group.chats) && Array.isArray(chats)) {
-                for (const chat of chats) {
-                    if (group.chats.includes(path.parse(chat).name)) {
-                        const chatStat = fs.statSync(path.join(request.user.directories.groupChats, chat));
-                        chat_size += chatStat.size;
-                        date_last_chat = Math.max(date_last_chat, chatStat.mtimeMs);
-                    }
-                }
-            }
-
-            group.date_last_chat = date_last_chat;
-            group.chat_size = chat_size;
-            groups.push(group);
+            return group;
         } catch (error) {
             console.error(error);
+            return null;
         }
-    });
+    }, groupListScanConcurrency);
+    const groups = parsedGroups.filter(Boolean);
 
-    return response.send(groups);
+    const referencedChatIds = new Set();
+    for (const group of groups) {
+        if (Array.isArray(group.chats)) {
+            for (const chatId of group.chats) {
+                referencedChatIds.add(chatId);
+            }
+        }
+    }
+
+    const referencedChatFiles = chatFiles.filter(file => referencedChatIds.has(path.parse(file).name));
+    const chatStats = new Map((await mapWithConcurrency(referencedChatFiles, async (file) => {
+        const chatId = path.parse(file).name;
+        try {
+            return [chatId, { stats: await fsPromises.stat(path.join(request.user.directories.groupChats, file)) }];
+        } catch (error) {
+            return [chatId, { error }];
+        }
+    }, groupListScanConcurrency)));
+
+    const validGroups = [];
+    for (const group of groups) {
+        let chatSize = 0;
+        let dateLastChat = 0;
+        let failed = false;
+
+        if (Array.isArray(group.chats)) {
+            for (const chatId of new Set(group.chats)) {
+                const chat = chatStats.get(chatId);
+                if (chat?.error) {
+                    console.error(chat.error);
+                    failed = true;
+                    break;
+                }
+                if (chat?.stats) {
+                    chatSize += chat.stats.size;
+                    dateLastChat = Math.max(dateLastChat, chat.stats.mtimeMs);
+                }
+            }
+        }
+
+        if (!failed) {
+            group.date_last_chat = dateLastChat;
+            group.chat_size = chatSize;
+            validGroups.push(group);
+        }
+    }
+
+    return response.send(validGroups);
 });
 
 router.post('/create', (request, response) => {

@@ -175,6 +175,36 @@ export function delay(ms) {
 }
 
 /**
+ * Maps items while limiting the number of active asynchronous operations.
+ * @template T, R
+ * @param {T[]} items Items to process
+ * @param {(item: T, index: number) => Promise<R>} mapper Async mapper
+ * @param {number} concurrency Maximum number of active mapper calls
+ * @returns {Promise<R[]>} Results in the same order as the input
+ */
+export async function mapWithConcurrency(items, mapper, concurrency) {
+    if (items.length === 0) {
+        return [];
+    }
+
+    const results = Array(items.length);
+    let nextIndex = 0;
+    const worker = async () => {
+        while (true) {
+            const index = nextIndex++;
+            if (index >= items.length) {
+                return;
+            }
+            results[index] = await mapper(items[index], index);
+        }
+    };
+
+    const workerCount = Math.min(Math.max(1, concurrency), items.length);
+    await Promise.all(Array.from({ length: workerCount }, worker));
+    return results;
+}
+
+/**
  * Generates a random hex string of the given length.
  * @param {number} length String length
  * @returns {string} Random hex string

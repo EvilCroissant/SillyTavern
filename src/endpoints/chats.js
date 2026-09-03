@@ -21,6 +21,7 @@ import {
     tryDeleteFileAsync,
     readFirstLine,
     isPathUnderParent,
+    mapWithConcurrency,
 } from '../util.js';
 
 const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean');
@@ -28,37 +29,6 @@ const maxTotalChatBackups = Number(getConfigValue('backups.chat.maxTotalBackups'
 const throttleInterval = Number(getConfigValue('backups.chat.throttleInterval', 10_000, 'number'));
 const checkIntegrity = !!getConfigValue('backups.chat.checkIntegrity', true, 'boolean');
 const chatScanConcurrency = 8;
-
-/**
- * Maps items with a small concurrency limit so a large chat directory does not
- * open every JSONL file at once while still avoiding serial file scans.
- * @template T, R
- * @param {T[]} items
- * @param {(item: T, index: number) => Promise<R>} mapper
- * @param {number} concurrency
- * @returns {Promise<R[]>}
- */
-async function mapWithConcurrency(items, mapper, concurrency) {
-    if (items.length === 0) {
-        return [];
-    }
-
-    const results = Array(items.length);
-    let nextIndex = 0;
-    const worker = async () => {
-        while (true) {
-            const index = nextIndex++;
-            if (index >= items.length) {
-                return;
-            }
-            results[index] = await mapper(items[index], index);
-        }
-    };
-
-    const workerCount = Math.min(Math.max(1, concurrency), items.length);
-    await Promise.all(Array.from({ length: workerCount }, worker));
-    return results;
-}
 
 export const CHAT_BACKUPS_PREFIX = 'chat_';
 
