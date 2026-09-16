@@ -1490,11 +1490,17 @@ export async function printMessages() {
         chatElement.append('<div id="show_more_messages">Show more messages</div>');
     }
 
-    await redisplayChat({ startIndex, fade: false });
+    const rendered = await redisplayChat({ startIndex, fade: false });
+    if (!rendered) {
+        return;
+    }
 
     scrollChatToBottom({ waitForFrame: true });
     delay(debounce_timeout.short).then(() => scrollOnMediaLoad());
 }
+
+const CHAT_RENDER_BATCH_SIZE = 8;
+let chatRenderId = 0;
 
 /**
  * Visually updates all chat messages including and after index by removing them, then adding them.
@@ -1504,6 +1510,7 @@ export async function printMessages() {
  * @param {Boolean} [options.fade=true] When false, the swipe chevrons will not fade in.
  */
 export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = true } = {}) {
+    const currentRenderId = ++chatRenderId;
     const messageElements = chatElement.find('.mes');
     messageElements.removeClass('last_mes');
 
@@ -1516,18 +1523,34 @@ export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = 
     const messageDepths = targetChat === chat ? getMessageDepths(targetChat) : null;
 
     if (messages.length > 0) {
-        const newMessageElements = messages.map((message, offset) => {
-            const i = startIndex + offset;
-            const messageElement = updateMessageElement(message, { messageId: i, messageDepth: messageDepths?.[i] });
+        let lastMessageElement;
 
-            return messageElement[0];
-        });
+        for (let batchStart = 0; batchStart < messages.length; batchStart += CHAT_RENDER_BATCH_SIZE) {
+            if (currentRenderId !== chatRenderId) {
+                return false;
+            }
+
+            const batch = messages.slice(batchStart, batchStart + CHAT_RENDER_BATCH_SIZE).map((message, offset) => {
+                const i = startIndex + batchStart + offset;
+                const messageElement = updateMessageElement(message, { messageId: i, messageDepth: messageDepths?.[i] });
+
+                return messageElement[0];
+            });
+
+            lastMessageElement = batch.at(-1);
+            chatElement.append(batch);
+
+            if (batchStart + batch.length < messages.length) {
+                await delay(0);
+            }
+        }
+
+        if (currentRenderId !== chatRenderId) {
+            return false;
+        }
 
         //The last_mes has been removed, add it to the new last message.
-        newMessageElements.at(-1).classList.add('last_mes');
-
-        //Append to chat in one DOM update.
-        chatElement.append(newMessageElements);
+        lastMessageElement.classList.add('last_mes');
 
         applyCharacterTagsToMessageDivs({ mesIds: lodash.range(startIndex, targetChat.length, 1) });
     }
@@ -1537,6 +1560,7 @@ export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = 
     updateEditArrowClasses();
 
     console.info(`Rendered ${targetChat.length - startIndex} messages in ${((performance.now() - t1) / 1000).toFixed(3)} seconds.`);
+    return true;
 }
 
 export function scrollOnMediaLoad() {
