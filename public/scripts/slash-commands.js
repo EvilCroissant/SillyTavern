@@ -104,12 +104,30 @@ export {
     executeSlashCommands, executeSlashCommandsWithOptions, getSlashCommandsHelp, registerSlashCommand,
 };
 
-export const parser = new SlashCommandParser();
+let parserInstance;
+
+function getParser() {
+    return parserInstance ??= new SlashCommandParser();
+}
+
+// Keep the public parser object lazy so the script.js <-> slash-commands.js
+// module cycle does not access SlashCommandParser while its module is still
+// being evaluated.
+export const parser = new Proxy(Object.create(null), {
+    get(_, property) {
+        const value = getParser()[property];
+        return typeof value === 'function' ? value.bind(getParser()) : value;
+    },
+    set(_, property, value) {
+        getParser()[property] = value;
+        return true;
+    },
+});
 /**
  * @deprecated Use SlashCommandParser.addCommandObject() instead
  */
-const registerSlashCommand = SlashCommandParser.addCommand.bind(SlashCommandParser);
-const getSlashCommandsHelp = parser.getHelpString.bind(parser);
+const registerSlashCommand = (...args) => SlashCommandParser.addCommand(...args);
+const getSlashCommandsHelp = (...args) => getParser().getHelpString(...args);
 
 /**
  * Converts a SlashCommandClosure to a filter function that returns a boolean.
@@ -7002,7 +7020,7 @@ async function executeSlashCommandsWithOptions(text, options = {}) {
 
     let closure;
     try {
-        closure = parser.parse(text, true, options.parserFlags, options.abortController ?? new SlashCommandAbortController());
+        closure = getParser().parse(text, true, options.parserFlags, options.abortController ?? new SlashCommandAbortController());
         closure.scope.parent = options.scope;
         closure.onProgress = options.onProgress;
         closure.debugController = options.debugController;

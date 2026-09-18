@@ -1452,23 +1452,41 @@ export async function showMoreMessages(messagesToLoad = null) {
     const isButtonInView = isElementInViewport(showMoreButton[0]);
 
     const firstId = clamp(messageId - count, 0, Infinity);
-    const messageElements = [];
     const messageDepths = getMessageDepths(chat);
-    chat.slice(firstId, messageId).forEach((message, id) => {
-        const currentId = firstId + id;
-        messageElements.push(updateMessageElement(message, { messageId: currentId, messageDepth: messageDepths[currentId] }));
-    });
-    // This could be faster: https://developer.mozilla.org/en-US/docs/Web/API/Element/insertAdjacentElement
-    // Fallback to chatElement if the button isn't where it's expected to be.
-    if (showMoreButton[0]) {
-        showMoreButton.after(messageElements);
-    } else {
-        chatElement.prepend(messageElements);
+    const firstMessageId = firstId;
+    let batchEnd = messageId;
+
+    while (batchEnd > firstId) {
+        const batchStart = Math.max(firstId, batchEnd - CHAT_RENDER_BATCH_SIZE);
+        const batch = [];
+
+        for (let currentId = batchStart; currentId < batchEnd; currentId++) {
+            const messageElement = updateMessageElement(chat[currentId], {
+                messageId: currentId,
+                messageDepth: messageDepths[currentId],
+                deferCodeHighlighting: true,
+            });
+            batch.push(messageElement[0]);
+        }
+
+        batchEnd = batchStart;
+
+        const fragment = document.createDocumentFragment();
+        fragment.append(...batch);
+        if (showMoreButton[0]) {
+            showMoreButton[0].after(fragment);
+        } else {
+            chatElement[0].prepend(fragment);
+        }
+
+        if (batchEnd > firstId) {
+            await delay(0);
+        }
     }
 
     refreshSwipeButtons();
 
-    if (firstId === 0) {
+    if (firstMessageId === 0) {
         showMoreButton.remove();
     }
 
@@ -1480,6 +1498,8 @@ export async function showMoreMessages(messagesToLoad = null) {
     applyStylePins();
     await eventSource.emit(event_types.MORE_MESSAGES_LOADED);
 }
+
+const CHAT_RENDER_BATCH_SIZE = 8;
 
 export async function printMessages() {
     let startIndex = 0;
@@ -1499,7 +1519,6 @@ export async function printMessages() {
     delay(debounce_timeout.short).then(() => scrollOnMediaLoad());
 }
 
-const CHAT_RENDER_BATCH_SIZE = 8;
 let chatRenderId = 0;
 
 /**
@@ -1525,22 +1544,32 @@ export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = 
     if (messages.length > 0) {
         let lastMessageElement;
 
-        for (let batchStart = 0; batchStart < messages.length; batchStart += CHAT_RENDER_BATCH_SIZE) {
+        let batchStart = 0;
+        while (batchStart < messages.length) {
             if (currentRenderId !== chatRenderId) {
                 return false;
             }
 
-            const batch = messages.slice(batchStart, batchStart + CHAT_RENDER_BATCH_SIZE).map((message, offset) => {
+            const batch = [];
+
+            while (batchStart + batch.length < messages.length && batch.length < CHAT_RENDER_BATCH_SIZE) {
+                const offset = batch.length;
                 const i = startIndex + batchStart + offset;
-                const messageElement = updateMessageElement(message, { messageId: i, messageDepth: messageDepths?.[i] });
+                const messageElement = updateMessageElement(messages[batchStart + offset], {
+                    messageId: i,
+                    messageDepth: messageDepths?.[i],
+                    deferCodeHighlighting: true,
+                });
+                batch.push(messageElement[0]);
+            }
 
-                return messageElement[0];
-            });
-
+            batchStart += batch.length;
             lastMessageElement = batch.at(-1);
-            chatElement.append(batch);
+            const fragment = document.createDocumentFragment();
+            fragment.append(...batch);
+            chatElement[0].append(fragment);
 
-            if (batchStart + batch.length < messages.length) {
+            if (batchStart < messages.length) {
                 await delay(0);
             }
         }
@@ -2544,14 +2573,19 @@ export function appendMediaToMessage(mes, messageElement, scrollBehavior = SCROL
     });
 }
 
-export function addCopyToCodeBlocks(messageElement) {
+export function addCopyToCodeBlocks(messageElement, { deferHighlighting = false } = {}) {
     const codeBlocks = $(messageElement).find('pre code');
     for (let i = 0; i < codeBlocks.length; i++) {
-        hljs.highlightElement(codeBlocks.get(i));
+        const codeBlock = codeBlocks.get(i);
         const copyButton = document.createElement('i');
         copyButton.classList.add('fa-solid', 'fa-copy', 'code-copy', 'interactable');
         copyButton.title = 'Copy code';
-        codeBlocks.get(i).appendChild(copyButton);
+        if (deferHighlighting) {
+            scheduleCodeHighlighting(codeBlock, copyButton);
+        } else {
+            hljs.highlightElement(codeBlock);
+        }
+        codeBlock.appendChild(copyButton);
         copyButton.addEventListener('click', function (e) {
             e.stopPropagation();
         });
@@ -2560,6 +2594,28 @@ export function addCopyToCodeBlocks(messageElement) {
             await copyText(text);
             toastr.info(t`Copied!`, '', { timeOut: 2000 });
         });
+    }
+}
+
+/**
+ * Runs syntax highlighting after the current render work has yielded to the browser.
+ * @param {HTMLElement} codeBlock Code block to highlight.
+ * @param {HTMLElement} copyButton Copy button belonging to the code block.
+ */
+function scheduleCodeHighlighting(codeBlock, copyButton) {
+    const highlight = () => {
+        if (!codeBlock.isConnected || codeBlock.classList.contains('hljs')) {
+            return;
+        }
+
+        hljs.highlightElement(codeBlock);
+        codeBlock.appendChild(copyButton);
+    };
+
+    if (typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(highlight, { timeout: 1000 });
+    } else {
+        window.setTimeout(highlight, 0);
     }
 }
 
@@ -2694,9 +2750,10 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
  * @param {JQuery<HTMLElement>} [options.messageElement=messageTemplate.clone()] This message element will be updated with the ChatMessage object.
  * @param {SCROLL_BEHAVIOR} [options.adjustMediaScroll=SCROLL_BEHAVIOR.NONE] Scroll behavior option passed to appendMediaToMessage.
  * @param {number} [options.messageDepth] Precomputed number of usable messages after this message.
+ * @param {boolean} [options.deferCodeHighlighting=false] Schedule syntax highlighting after the message is displayed.
  * @returns {JQuery<HTMLElement>} Rendered HTMLElement.
  */
-export function updateMessageElement(mes, { messageId = chat.length - 1, messageElement = messageTemplate.clone(), adjustMediaScroll = SCROLL_BEHAVIOR.NONE, messageDepth = undefined } = {}) {
+export function updateMessageElement(mes, { messageId = chat.length - 1, messageElement = messageTemplate.clone(), adjustMediaScroll = SCROLL_BEHAVIOR.NONE, messageDepth = undefined, deferCodeHighlighting = false } = {}) {
     let avatarImg = getThumbnailUrl('persona', user_avatar);
 
     //for non-user messages
@@ -2775,7 +2832,7 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
 
     appendMediaToMessage(mes, messageElement, adjustMediaScroll);
     messageElement.find('.mes_text').html(messageHTML);
-    addCopyToCodeBlocks(messageElement);
+    addCopyToCodeBlocks(messageElement, { deferHighlighting: deferCodeHighlighting });
 
     // Set the swipes counter for all non-user messages.
     if (!mes.is_user) {

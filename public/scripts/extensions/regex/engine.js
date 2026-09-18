@@ -345,6 +345,12 @@ export function getRegexedString(rawString, placement, { characterOverride, isMa
 
     const allRegex = getRegexScripts({ allowedOnly: true });
     allRegex.forEach((script) => {
+        // Disabled scripts cannot affect the output. Skip them before depth
+        // checks and debug logging, both of which run for every rendered message.
+        if (script.disabled) {
+            return;
+        }
+
         if (
             // Script applies to Markdown and input is Markdown
             (script.markdownOnly && isMarkdown) ||

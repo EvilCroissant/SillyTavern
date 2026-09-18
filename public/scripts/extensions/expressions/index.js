@@ -97,6 +97,9 @@ const PROMPT_TYPE = {
 let expressionsList = null;
 let lastCharacter = undefined;
 let lastMessage = null;
+// The visual novel wrapper is created hidden. Track the mode ourselves so the
+// periodic worker does not need a layout-forcing `:visible` selector.
+let visualNovelModeActive = false;
 /** @type {{[characterKey: string]: Expression[]}} */
 let spriteCache = {};
 let inApiCall = false;
@@ -499,19 +502,12 @@ async function moduleWorker({ newChat = false } = {}) {
     }
 
     const vnMode = isVisualNovelMode();
-    const vnWrapperVisible = $('#visual-novel-wrapper').is(':visible');
-
-    if (vnMode) {
-        $('#expression-wrapper').hide();
-        $('#visual-novel-wrapper').show();
-    } else {
-        $('#expression-wrapper').show();
-        $('#visual-novel-wrapper').hide();
-    }
-
-    const vnStateChanged = vnMode !== vnWrapperVisible;
+    const vnStateChanged = vnMode !== visualNovelModeActive;
 
     if (vnStateChanged) {
+        visualNovelModeActive = vnMode;
+        $('#expression-wrapper').toggle(!vnMode);
+        $('#visual-novel-wrapper').toggle(vnMode);
         lastMessage = null;
         $('#visual-novel-wrapper').empty();
         $('#expression-holder').css({ top: '', left: '', right: '', bottom: '', height: '', width: '', margin: '' });
