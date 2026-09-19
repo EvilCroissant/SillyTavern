@@ -100,6 +100,8 @@ let lastMessage = null;
 // The visual novel wrapper is created hidden. Track the mode ourselves so the
 // periodic worker does not need a layout-forcing `:visible` selector.
 let visualNovelModeActive = false;
+// Keep this state locally instead of querying `:visible` on every worker tick.
+let offlineModeActive = false;
 /** @type {{[characterKey: string]: Expression[]}} */
 let spriteCache = {};
 let inApiCall = false;
@@ -523,10 +525,12 @@ async function moduleWorker({ newChat = false } = {}) {
     }
 
     const offlineMode = $('.expression_settings .offline_mode');
-    if (!modules.includes('classify') && extension_settings.expressions.api == EXPRESSION_API.extras) {
+    const shouldUseOfflineMode = !modules.includes('classify') && extension_settings.expressions.api == EXPRESSION_API.extras;
+    if (shouldUseOfflineMode) {
         $('#open_chat_expressions').show();
         $('#no_chat_expressions').hide();
         offlineMode.css('display', 'block');
+        offlineModeActive = true;
         lastCharacter = context.groupId || context.characterId;
 
         if (context.groupId) {
@@ -537,12 +541,13 @@ async function moduleWorker({ newChat = false } = {}) {
         return;
     } else {
         // force reload expressions list on connect to API
-        if (offlineMode.is(':visible')) {
+        if (offlineModeActive) {
             expressionsList = null;
             spriteCache = {};
             expressionsList = await getExpressionsList();
             await validateImages(spriteFolderName, true);
             await forceUpdateVisualNovelMode();
+            offlineModeActive = false;
         }
 
         if (context.groupId && !Array.isArray(spriteCache[spriteFolderName])) {

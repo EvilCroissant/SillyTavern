@@ -146,6 +146,12 @@ class MessageFormatter {
     #hooks = new Map();
 
     /**
+     * Registration order used to keep hooks with the same priority stable.
+     * @type {number}
+     */
+    #nextHookId = 0;
+
+    /**
      * Exposes {@link formatting_stage} on the instance so extensions can
      * access stage constants without a separate import.
      * @type {typeof formatting_stage}
@@ -185,7 +191,9 @@ class MessageFormatter {
         if (typeof fn !== 'function') throw new TypeError('MessageFormatter: hook must be a function');
         if (fn.constructor?.name === 'AsyncFunction') throw new TypeError(`MessageFormatter: hook registered for stage '${stage}' must be synchronous — async functions are not supported`);
         if (!this.#hooks.has(stage)) throw new RangeError(`MessageFormatter: unknown stage '${stage}'`);
-        this.#hooks.get(stage).push({ fn, order });
+        const bucket = this.#hooks.get(stage);
+        bucket.push({ fn, order, id: this.#nextHookId++ });
+        bucket.sort((a, b) => a.order - b.order || a.id - b.id);
     }
 
     /**
@@ -202,8 +210,7 @@ class MessageFormatter {
         const bucket = this.#hooks.get(stage);
         if (!bucket?.length) return mes;
         const ctx = Object.freeze({ ...base, stage });
-        const sorted = bucket.slice().sort((a, b) => a.order - b.order);
-        for (const { fn } of sorted) {
+        for (const { fn } of bucket) {
             try {
                 const result = fn(mes, ctx);
                 if (typeof result !== 'string') {

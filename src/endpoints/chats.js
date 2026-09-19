@@ -17,7 +17,6 @@ import {
     removeOldBackupsAsync,
     formatBytes,
     tryWriteFileAsync,
-    tryReadFileSync,
     tryDeleteFileAsync,
     readFirstLine,
     isPathUnderParent,
@@ -395,7 +394,7 @@ function importRisuChat(userName, characterName, jsonData) {
 /**
  * Checks if the chat being saved has the same integrity as the one being loaded.
  * @param {string} filePath Path to the chat file
- * @param {string} integritySlug Integrity slug
+ * @param {string|undefined} integritySlug Integrity slug from the incoming chat
  * @returns {Promise<boolean>} Whether the chat is intact
  */
 async function checkChatIntegrity(filePath, integritySlug) {
@@ -598,7 +597,7 @@ export async function trySaveChat(chatData, filePath, skipIntegrityCheck = false
         const doIntegrityCheck = (checkIntegrity && !skipIntegrityCheck);
         const chatIntegritySlug = doIntegrityCheck ? chatData?.[0]?.chat_metadata?.integrity : undefined;
 
-        if (chatIntegritySlug && !await checkChatIntegrity(filePath, chatIntegritySlug)) {
+        if (doIntegrityCheck && !await checkChatIntegrity(filePath, chatIntegritySlug)) {
             throw new IntegrityMismatchError(`Chat integrity check failed for "${filePath}". The expected integrity slug was "${chatIntegritySlug}".`);
         }
 
@@ -607,12 +606,23 @@ export async function trySaveChat(chatData, filePath, skipIntegrityCheck = false
     });
 }
 
+/**
+ * Normalizes a character chat name to the on-disk JSONL filename.
+ * Character metadata from older clients may already include the extension.
+ * @param {string} fileName Chat name or JSONL filename
+ * @returns {string} JSONL filename
+ */
+export function normalizeChatFileName(fileName) {
+    const value = String(fileName);
+    return value.toLowerCase().endsWith('.jsonl') ? value : `${value}.jsonl`;
+}
+
 router.post('/save', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         const handle = request.user.profile.handle;
         const cardName = String(request.body.avatar_url).replace('.png', '');
         const chatData = request.body.chat;
-        const chatFileName = `${String(request.body.file_name)}.jsonl`;
+        const chatFileName = normalizeChatFileName(request.body.file_name);
         const chatFilePath = path.join(request.user.directories.chats, cardName, sanitize(chatFileName));
         if (!isPathUnderParent(request.user.directories.chats, chatFilePath)) {
             return response.sendStatus(400);
@@ -637,18 +647,28 @@ router.post('/save', validateAvatarUrlMiddleware, async function (request, respo
 /**
  * Gets the chat as an object.
  * @param {string} chatFilePath The full chat file path.
- * @returns {Array}} If the chatFilePath cannot be read, this will return [].
+ * @returns {Array} Parsed chat records. A missing or empty file returns [].
+ * @throws {Error} If an existing file cannot be read or contains invalid JSON.
  */
 export function getChatData(chatFilePath) {
-    let chatData = [];
-
-    const chatJSON = tryReadFileSync(chatFilePath) ?? '';
-    if (chatJSON.length > 0) {
-        const lines = chatJSON.split('\n');
-        // Iterate through the array of strings and parse each line as JSON
-        chatData = lines.map(line => tryParse(line)).filter(x => x);
-    } else {
+    if (!fs.existsSync(chatFilePath)) {
         console.warn(`File not found: ${chatFilePath}. The chat does not exist or is empty.`);
+        return [];
+    }
+
+    const chatJSON = fs.readFileSync(chatFilePath, 'utf8');
+    if (chatJSON.length === 0) {
+        console.warn(`File is empty: ${chatFilePath}. The chat does not exist or is empty.`);
+        return [];
+    }
+
+    const lines = chatJSON.split('\n').filter(line => line.trim().length > 0);
+    const chatData = lines.map((line, index) => tryParse(index === 0 ? line.replace(/^\uFEFF/, '') : line));
+    if (chatData.some(item => !item || typeof item !== 'object' || Array.isArray(item))) {
+        throw new Error(`Chat file contains invalid JSON: ${chatFilePath}`);
+    }
+    if (chatData.length === 1) {
+        throw new Error(`Chat file contains a header but no messages: ${chatFilePath}`);
     }
 
     return chatData;
@@ -666,20 +686,23 @@ router.post('/get', validateAvatarUrlMiddleware, function (request, response) {
         //if no chat dir for the character is found, make one with the character name
         if (!chatDirExists) {
             fs.mkdirSync(directoryPath);
-            return response.send({});
+            response.set('X-Chat-File-Exists', 'false');
+            return response.send([]);
         }
 
         if (!request.body.file_name) {
-            return response.send({});
+            response.set('X-Chat-File-Exists', 'false');
+            return response.send([]);
         }
 
-        const chatFileName = `${String(request.body.file_name)}.jsonl`;
+        const chatFileName = normalizeChatFileName(request.body.file_name);
         const chatFilePath = path.join(directoryPath, sanitize(chatFileName));
+        response.set('X-Chat-File-Exists', String(fs.existsSync(chatFilePath)));
 
         return response.send(getChatData(chatFilePath));
     } catch (error) {
         console.error(error);
-        return response.send({});
+        return response.sendStatus(500);
     }
 });
 
@@ -941,6 +964,7 @@ router.post('/group/get', (request, response) => {
 
     const id = request.body.id;
     const chatFilePath = path.join(request.user.directories.groupChats, sanitize(`${id}.jsonl`));
+    response.set('X-Chat-File-Exists', String(fs.existsSync(chatFilePath)));
 
     return response.send(getChatData(chatFilePath));
 });
