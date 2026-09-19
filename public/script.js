@@ -49,6 +49,7 @@ import {
     initWorldInfo,
     charUpdatePrimaryWorld,
     charSetAuxWorlds,
+    preloadCurrentChatWorldInfo,
 } from './scripts/world-info.js';
 
 import {
@@ -7962,6 +7963,7 @@ export async function getChat() {
         if (!chat_metadata.integrity) {
             chat_metadata.integrity = uuidv4();
         }
+        await preloadCurrentChatWorldInfo();
         const ready = await getChatResult();
         if (ready === false) {
             throw new Error('Chat rendering was cancelled');
@@ -8980,7 +8982,10 @@ export function selectRightMenuWithAnimation(selectedMenuId) {
         'rm_api_block': 'grid',
         'rm_characters_block': 'flex',
     };
-    $('#result_info').toggle(selectedMenuId === 'rm_ch_create_block');
+    const resultInfo = document.getElementById('result_info');
+    if (resultInfo) {
+        resultInfo.style.display = selectedMenuId === 'rm_ch_create_block' ? 'flex' : 'none';
+    }
     document.querySelectorAll('#right-nav-panel .right_menu').forEach((menu) => {
         $(menu).css('display', 'none');
 
@@ -8996,6 +9001,15 @@ export function selectRightMenuWithAnimation(selectedMenuId) {
             });
         }
     });
+}
+
+/**
+ * Updates display styles without forcing a computed-style read.
+ * @param {string} selector Element selector
+ * @param {string} display Display value
+ */
+function setElementDisplay(selector, display) {
+    document.querySelectorAll(selector).forEach(element => element.style.display = display);
 }
 
 export function select_rm_info(type, charId, previousCharId = null) {
@@ -9116,12 +9130,12 @@ export function select_selected_character(chid, { switchMenu = true } = {}) {
     $('#rm_button_back').css('display', 'none');
     //$("#character_import_button").css("display", "none");
     $('#create_button').attr('value', 'Save');              // what is the use case for this?
-    $('#dupe_button').show();
+    setElementDisplay('#dupe_button', '');
     $('#create_button_label').css('display', 'none');
-    $('#char_connections_button').show();
+    setElementDisplay('#char_connections_button', '');
 
     // Hide the chat scenario button if we're peeking the group member defs
-    $('#set_chat_character_settings').toggle(!selected_group);
+    setElementDisplay('#set_chat_character_settings', selected_group ? 'none' : '');
 
     // Don't update the navbar name if we're peeking the group member defs
     if (!selected_group) {
@@ -9171,12 +9185,12 @@ export function select_selected_character(chid, { switchMenu = true } = {}) {
     $('#renameCharButton').css('display', '');
 
     $('#form_create').attr('actiontype', 'editcharacter');
-    $('.form_create_bottom_buttons_block .chat_lorebook_button').show();
+    setElementDisplay('.form_create_bottom_buttons_block .chat_lorebook_button', '');
 
     const externalMediaState = isExternalMediaAllowed();
-    $('#character_open_media_overrides').toggle(!selected_group);
-    $('#character_media_allowed_icon').toggle(externalMediaState);
-    $('#character_media_forbidden_icon').toggle(!externalMediaState);
+    setElementDisplay('#character_open_media_overrides', selected_group ? 'none' : '');
+    setElementDisplay('#character_media_allowed_icon', externalMediaState ? '' : 'none');
+    setElementDisplay('#character_media_forbidden_icon', externalMediaState ? 'none' : '');
 
     // Update some stuff about the char management dropdown
     $('#character_source').attr('disabled', !getCharacterSource(chid) ? '' : null);
@@ -9203,14 +9217,14 @@ function select_rm_create({ switchMenu = true } = {}) {
 
     switchMenu && selectRightMenuWithAnimation('rm_ch_create_block');
 
-    $('#set_chat_character_settings').hide();
+    setElementDisplay('#set_chat_character_settings', 'none');
     $('#delete_button_div').css('display', 'none');
     $('#delete_button').css('display', 'none');
     $('#export_button').css('display', 'none');
     $('#create_button_label').css('display', '');
     $('#create_button').attr('value', 'Create');
-    $('#dupe_button').hide();
-    $('#char_connections_button').hide();
+    setElementDisplay('#dupe_button', 'none');
+    setElementDisplay('#char_connections_button', 'none');
 
     //create text poles
     $('#rm_button_back').css('display', '');
@@ -9247,8 +9261,8 @@ function select_rm_create({ switchMenu = true } = {}) {
     checkEmbeddedWorld();
 
     $('#form_create').attr('actiontype', 'createcharacter');
-    $('.form_create_bottom_buttons_block .chat_lorebook_button').hide();
-    $('#character_open_media_overrides').hide();
+    setElementDisplay('.form_create_bottom_buttons_block .chat_lorebook_button', 'none');
+    setElementDisplay('#character_open_media_overrides', 'none');
 }
 
 function select_rm_characters() {
@@ -9493,11 +9507,20 @@ export async function updateSwipeCounter(mesId, { message = undefined, messageEl
         .toggleClass(INTERACTABLE_CONTROL_CLASS, canOpenSwipePicker)
         .attr('role', canOpenSwipePicker ? 'button' : null)
         .attr('title', canJumpToSwipe ? t`Click to jump to a swipe` : canOpenSwipePicker ? t`Click to view swipe history` : null);
-    swipePickerButton.toggle(canOpenSwipePicker);
+    setSwipePickerVisibility(swipePickerButton, canOpenSwipePicker);
 
     if (!canOpenSwipePicker) {
         swipeCounter.removeAttr('tabindex');
     }
+}
+
+/**
+ * Sets swipe picker visibility without reading computed styles.
+ * @param {JQuery<HTMLElement>} buttons Swipe picker buttons to update.
+ * @param {boolean} visible Whether the buttons should be visible.
+ */
+function setSwipePickerVisibility(buttons, visible) {
+    buttons.each((_, button) => button.style.display = visible ? '' : 'none');
 }
 
 /**
@@ -9641,14 +9664,14 @@ function refreshSwipeButtonsForMessages(messageElements, updateCounters = false,
 
             // If there's only one swipe, the left arrow should not be shown.
             div.classList.toggle('swipes_visible', hasSwipes || pristineGreeting);
-            swipePickerButton.toggle(canOpenSwipePicker);
+            setSwipePickerVisibility(swipePickerButton, canOpenSwipePicker);
 
             // updateSwipeCounter does not need to be awaited; it can run later.
             if (updateCounters) updateSwipeCounter(messageId, { message, messageElement: $(div) });
         } else {
             // Hide messages that are not swipeable.
             div.classList.remove('swipes_visible', 'last_swipe');
-            $(div).find('.mes_swipe_picker').toggle(canOpenSwipePickerForMessage(messageId));
+            setSwipePickerVisibility($(div).find('.mes_swipe_picker'), canOpenSwipePickerForMessage(messageId));
         }
     });
 }

@@ -1010,11 +1010,9 @@ export function setWorldInfoSettings(settings, data) {
     $('#world_info').trigger('change');
     $('#world_editor_select').trigger('change');
 
-    eventSource.on(event_types.CHAT_CHANGED, async () => {
+    eventSource.on(event_types.CHAT_CHANGED, () => {
         const hasWorldInfo = !!chat_metadata[METADATA_KEY] && world_names.includes(chat_metadata[METADATA_KEY]);
         $('.chat_lorebook_button').toggleClass('world_set', hasWorldInfo);
-        // Pre-cache the world info data for the chat for quicker first prompt generation
-        await getSortedEntries();
     });
 
     eventSource.on(event_types.WORLDINFO_FORCE_ACTIVATE, (entries) => {
@@ -2056,6 +2054,25 @@ export async function loadWorldInfo(name) {
     }
 
     return null;
+}
+
+/**
+ * Loads world info books used by the current chat into the shared cache.
+ * This intentionally does not sort entries or emit world info events.
+ */
+export async function preloadCurrentChatWorldInfo() {
+    const character = characters[this_chid];
+    const fileName = getCharaFilename(this_chid);
+    const extraCharLore = world_info.charLore?.find((entry) => entry.name === fileName);
+    const names = new Set([
+        ...selected_world_info,
+        character?.data?.extensions?.world,
+        ...(extraCharLore?.extraBooks ?? []),
+        chat_metadata[METADATA_KEY],
+        power_user.persona_description_lorebook,
+    ].filter(name => name && world_names.includes(name)));
+
+    await Promise.all([...names].map(name => loadWorldInfo(name)));
 }
 
 export async function updateWorldInfoList() {
@@ -5689,14 +5706,20 @@ export function setWorldInfoButtonClass(chid, forceValue = undefined) {
 }
 
 export function checkEmbeddedWorld(chid) {
-    $('#import_character_info').hide();
+    const importCharacterInfo = document.getElementById('import_character_info');
+    if (importCharacterInfo) {
+        importCharacterInfo.style.display = 'none';
+    }
 
     if (chid === undefined) {
         return false;
     }
 
     if (characters[chid]?.data?.character_book) {
-        $('#import_character_info').data('chid', chid).show();
+        $(importCharacterInfo).data('chid', chid);
+        if (importCharacterInfo) {
+            importCharacterInfo.style.display = '';
+        }
 
         // Only show the alert once per character
         const checkKey = `AlertWI_${characters[chid].avatar}`;
