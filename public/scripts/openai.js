@@ -1633,7 +1633,7 @@ export async function prepareOpenAIMessages({
  * @returns {string} Error message to display and throw
  */
 function getChatCompletionErrorMessage(data, response) {
-    const error = data?.error ?? data?.detail?.error;
+    const error = data?.error ?? data?.detail?.error ?? data?.detail;
     const message = typeof error === 'string' ? error : (error?.message || error?.code || error?.type);
     return String(message || (!response.ok && response.statusText) || t`Unknown error`);
 }
@@ -1646,35 +1646,25 @@ function getChatCompletionErrorMessage(data, response) {
  * @param {boolean?} [options.quiet=false] Suppress toast messages
  */
 export function tryParseStreamingError(response, decoded, { quiet = false } = {}) {
+    let data;
     try {
-        const data = JSON.parse(decoded);
-
-        if (!data) {
-            return;
-        }
-
-        checkQuotaError(data, { quiet });
-        checkModerationError(data, { quiet });
-
-        // these do not throw correctly (equiv to Error("[object Object]"))
-        // if trying to fix "[object Object]" displayed to users, start here
-
-        if (data.error) {
-            !quiet && toastr.error(getChatCompletionErrorMessage(data, response), 'Chat Completion API');
-            throw new Error(data);
-        }
-
-        if (data.message) {
-            !quiet && toastr.error(data.message, 'Chat Completion API');
-            throw new Error(data);
-        }
-
-        if (data.detail) {
-            !quiet && toastr.error(getChatCompletionErrorMessage(data, response), 'Chat Completion API');
-            throw new Error(data);
-        }
+        data = JSON.parse(decoded);
     } catch {
-        // No JSON. Do nothing.
+        // Ignore non-JSON chunks, but never catch the API errors below.
+        return;
+    }
+
+    if (!data) return;
+    checkQuotaError(data, { quiet });
+    checkModerationError(data, { quiet });
+
+    // Claude's message_start events carry a normal message object.
+    if (data.error || (typeof data.message === 'string' && data.message) || data.detail) {
+        const message = data.error || data.detail
+            ? getChatCompletionErrorMessage(data, response)
+            : String(data.message);
+        !quiet && toastr.error(message, 'Chat Completion API');
+        throw new Error(message);
     }
 }
 
@@ -3168,9 +3158,15 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } =
             const state = { reasoning: '', images: [], signature: '', toolSignatures: {} };
             while (true) {
                 const { done, value } = await reader.read();
-                if (done) return;
+                if (done || value.data === '[DONE]') {
+                    if (!text && !swipes.some(Boolean) && !toolCalls.length && !state.reasoning && !state.images.length) {
+                        const message = t`The API returned an empty response.`;
+                        toastr.error(message, t`Text generation error`);
+                        throw new Error(message);
+                    }
+                    return;
+                }
                 const rawData = value.data;
-                if (rawData === '[DONE]') return;
                 tryParseStreamingError(response, rawData);
                 const parsed = JSON.parse(rawData);
 

@@ -3773,7 +3773,6 @@ function hideStopButton() {
     // prevent NOOP, because hideStopButton() gets called multiple times
     if ($('#mes_stop').css('display') !== 'none') {
         $('#mes_stop').css({ 'display': 'none' });
-        eventSource.emit(event_types.GENERATION_ENDED, chat.length);
     }
 }
 
@@ -4564,22 +4563,53 @@ function removeLastMessage() {
  * @param {boolean} dryRun Whether to actually generate a message or just assemble the prompt
  * @returns {Promise<any>} Returns a promise that resolves when the text is done generating.
  */
-export async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0 } = {}, dryRun = false) {
+export async function Generate(type, options = {}, dryRun = false) {
     console.log('Generate entered');
     setGenerationProgress(0);
     generation_started = new Date();
 
-    // Prevent generation from shallow characters
-    await unshallowCharacter(this_chid);
+    let started = false;
+    let result;
+    try {
+        // Prevent generation from shallow characters
+        await unshallowCharacter(this_chid);
 
-    // Occurs every time, even if the generation is aborted due to slash commands execution
-    await eventSource.emit(event_types.GENERATION_STARTED, type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage }, dryRun);
+        // Install the controller before notifying extensions: a listener may stop
+        // generation while it is waiting for a preset or another operation.
+        if (!(abortController && options.signal)) {
+            abortController = new AbortController();
+        }
 
-    // Don't recreate abort controller if signal is passed
-    if (!(abortController && signal)) {
-        abortController = new AbortController();
+        const { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage } = options;
+        started = true;
+        await eventSource.emit(event_types.GENERATION_STARTED, type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage }, dryRun);
+        if (!dryRun && abortController.signal.aborted) return;
+
+        result = await generateInternal(type, options, dryRun);
+    } finally {
+        // Preparation can return or throw before the stop button ever appears.
+        // Pair lifecycle events independently of the button's visual state.
+        if (!dryRun) unblockGeneration(type);
+        const parallelStream = type === 'quiet' && streamingProcessor && !streamingProcessor.isFinished;
+        if (started && !dryRun && !parallelStream) eventSource.emit(event_types.GENERATION_ENDED, chat.length);
     }
 
+    // Start a continuation only after this generation has released its state
+    // and notified extensions that it ended.
+    if (!dryRun && !options.depth && type !== 'quiet' && result?.messageChunk !== undefined) {
+        triggerAutoContinue(result.messageChunk, type === 'impersonate');
+    }
+    return result;
+}
+
+/**
+ * Assembles the prompt and runs a generation inside Generate's lifecycle.
+ * @param {string} type Generation type
+ * @param {GenerateOptions} options Generation options
+ * @param {boolean} dryRun Whether to only assemble the prompt
+ * @returns {Promise<any>} Generation result
+ */
+async function generateInternal(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0 }, dryRun) {
     // OpenAI doesn't need instruct mode. Use OAI main prompt instead.
     const isInstruct = power_user.instruct.enabled && main_api !== 'openai';
     const isImpersonate = type == 'impersonate';
@@ -4596,6 +4626,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
 
     // Occurs only if the generation is not aborted due to slash commands execution
     await eventSource.emit(event_types.GENERATION_AFTER_COMMANDS, type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage }, dryRun);
+    if (!dryRun && abortController.signal.aborted) return;
 
     if (main_api == 'kobold' && kai_settings.streaming_kobold && !kai_flags.can_use_streaming) {
         toastr.error(t`Streaming is enabled, but the version of Kobold used does not support token streaming.`, undefined, { timeOut: 10000, preventDuplicates: true });
@@ -5593,6 +5624,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     }
 
     await eventSource.emit(event_types.GENERATE_AFTER_DATA, generate_data, dryRun);
+    if (!dryRun && abortController.signal.aborted) return;
 
     if (dryRun) {
         return Promise.resolve();
@@ -5716,7 +5748,6 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             if (isStreamFinished) {
                 await streamingProcessor.onFinishStreaming(streamingProcessor.messageId, getMessage);
                 streamingProcessor = null;
-                triggerAutoContinue(messageChunk, isImpersonate);
                 return Object.defineProperties(new String(getMessage), {
                     'messageChunk': { value: messageChunk },
                     'fromStream': { value: true },
@@ -5850,10 +5881,6 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         await saveChatConditional();
         unblockGeneration(type);
         streamingProcessor = null;
-
-        if (type !== 'quiet') {
-            triggerAutoContinue(messageChunk, isImpersonate);
-        }
 
         // Don't break the API chain that expects a single string in return
         return Object.defineProperty(new String(getMessage), 'messageChunk', { value: messageChunk });

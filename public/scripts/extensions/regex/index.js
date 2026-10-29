@@ -1492,70 +1492,72 @@ async function toggleRegexCallback(args, scriptName) {
 }
 
 /**
- * Performs the import of the regex object.
- * @param {RegexScript} regexScript Input object
+ * Imports all selected files as one batch, persisting and refreshing only once.
+ * @param {File[]} files Input files
  * @param {SCRIPT_TYPES} scriptType The type of script to import as
  */
-async function onRegexImportObjectChange(regexScript, scriptType) {
-    try {
-        if (!regexScript.scriptName) {
-            throw new Error('No script name provided.');
-        }
-
-        // Assign a new UUID
-        regexScript.id = uuidv4();
-
-        const array = getScriptsByType(scriptType);
-        array.push(regexScript);
-
-        switch (scriptType) {
-            case SCRIPT_TYPES.GLOBAL:
-                // will be handled by saveSettingsDebounced
-                break;
-            case SCRIPT_TYPES.SCOPED:
-                await saveScriptsByType(array, SCRIPT_TYPES.SCOPED);
-                break;
-            case SCRIPT_TYPES.PRESET:
-                await saveScriptsByType(array, SCRIPT_TYPES.PRESET);
-                break;
-            default:
-                break;
-        }
-
-        saveSettingsDebounced();
-        await loadRegexScripts();
-        toastr.success(t`Regex script "${regexScript.scriptName}" imported.`);
-    } catch (error) {
-        console.log(error);
-        toastr.error(t`Invalid regex object.`);
-        return;
-    }
-}
-
-/**
- * Performs the import of the regex file.
- * @param {File} file Input file
- * @param {SCRIPT_TYPES} scriptType The type of script to import as
- */
-async function onRegexImportFileChange(file, scriptType) {
-    if (!file) {
+async function onRegexImportFilesChange(files, scriptType) {
+    if (!files.length) {
         toastr.error('No file provided.');
         return;
     }
 
+    const presetAPI = getCurrentPresetAPI();
+    const presetName = getCurrentPresetName();
+    const characterAvatar = characters[this_chid]?.avatar;
+    /** @type {RegexScript[]} */
+    const importedScripts = [];
+
     try {
-        const regexScripts = JSON.parse(await getFileText(file));
-        if (Array.isArray(regexScripts)) {
-            for (const regexScript of regexScripts) {
-                await onRegexImportObjectChange(regexScript, scriptType);
-            }
-        } else {
-            await onRegexImportObjectChange(regexScripts, scriptType);
+        for (const file of files) {
+            const parsed = JSON.parse(await getFileText(file));
+            importedScripts.push(...(Array.isArray(parsed) ? parsed : [parsed]));
         }
     } catch (error) {
         console.log(error);
         toastr.error('Invalid JSON file.');
         return;
+    }
+
+    // Validate the complete batch before changing any live or saved scripts.
+    if (importedScripts.some(script => !script || typeof script !== 'object' || Array.isArray(script)
+        || typeof script.scriptName !== 'string' || !script.scriptName.trim())) {
+        toastr.error(t`Invalid regex object.`);
+        return;
+    }
+    if (!importedScripts.length) {
+        return;
+    }
+
+    if ((scriptType === SCRIPT_TYPES.PRESET && (!presetName || presetAPI !== getCurrentPresetAPI() || presetName !== getCurrentPresetName()))
+        || (scriptType === SCRIPT_TYPES.SCOPED && (!characterAvatar || selected_group || characterAvatar !== characters[this_chid]?.avatar))) {
+        toastr.error(t`The import target changed. Please import the files again.`);
+        return;
+    }
+
+    const scripts = [
+        ...getScriptsByType(scriptType),
+        ...importedScripts.map(script => ({ ...script, id: uuidv4() })),
+    ];
+
+    try {
+        await saveScriptsByType(scripts, scriptType);
+        // Global scripts schedule their own settings save; preset scripts save
+        // settings immediately. Only scoped imports need this additional save.
+        if (scriptType === SCRIPT_TYPES.SCOPED) {
+            saveSettingsDebounced();
+        }
+    } catch (error) {
+        console.error('Could not import regex scripts', error);
+        toastr.error(t`Regex scripts could not be imported.`);
+        return;
+    }
+
+    await loadRegexScripts();
+    if (importedScripts.length === 1) {
+        toastr.success(t`Regex script "${importedScripts[0].scriptName}" imported.`);
+    } else {
+        toastr.success(t`Imported ${importedScripts.length} regex scripts.`);
     }
 }
 
@@ -1748,19 +1750,25 @@ export async function init() {
         onRegexEditorOpenClick(false, SCRIPT_TYPES.PRESET);
     });
     $('#import_regex_file').on('change', async function () {
-        let target = SCRIPT_TYPES.GLOBAL;
-        const template = $(await renderExtensionTemplateAsync('regex', 'importTarget'));
-        template.find('#regex_import_target_global').on('input', () => (target = SCRIPT_TYPES.GLOBAL));
-        template.find('#regex_import_target_scoped').on('input', () => (target = SCRIPT_TYPES.SCOPED));
-        template.find('#regex_import_target_preset').on('input', () => (target = SCRIPT_TYPES.PRESET));
-
-        await callGenericPopup(template, POPUP_TYPE.TEXT);
-
-        const inputElement = this instanceof HTMLInputElement && this;
-        for (const file of inputElement.files) {
-            await onRegexImportFileChange(file, target);
+        if (!(this instanceof HTMLInputElement) || this.disabled || !this.files.length) {
+            return;
         }
-        inputElement.value = '';
+        const inputElement = this;
+        const files = Array.from(inputElement.files);
+        inputElement.disabled = true;
+        try {
+            let target = SCRIPT_TYPES.GLOBAL;
+            const template = $(await renderExtensionTemplateAsync('regex', 'importTarget'));
+            template.find('#regex_import_target_global').on('input', () => (target = SCRIPT_TYPES.GLOBAL));
+            template.find('#regex_import_target_scoped').on('input', () => (target = SCRIPT_TYPES.SCOPED));
+            template.find('#regex_import_target_preset').on('input', () => (target = SCRIPT_TYPES.PRESET));
+
+            await callGenericPopup(template, POPUP_TYPE.TEXT);
+            await onRegexImportFilesChange(files, target);
+        } finally {
+            inputElement.value = '';
+            inputElement.disabled = false;
+        }
     });
     $('#import_regex').on('click', function () {
         $('#import_regex_file').trigger('click');
