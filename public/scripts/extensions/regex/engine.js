@@ -324,6 +324,25 @@ function sanitizeRegexMacro(x) {
 }
 
 /**
+ * Checks the shared depth limits used by prompt and display processing.
+ * @param {RegexScript} script Regex script
+ * @param {number|undefined} depth Message depth
+ * @returns {boolean} Whether the script applies at this depth
+ */
+export function isRegexScriptInDepthRange(script, depth) {
+    if (typeof depth !== 'number') {
+        return true;
+    }
+    if (!isNaN(script.minDepth) && script.minDepth !== null && script.minDepth >= -1 && depth < script.minDepth) {
+        return false;
+    }
+    if (!isNaN(script.maxDepth) && script.maxDepth !== null && script.maxDepth >= 0 && depth > script.maxDepth) {
+        return false;
+    }
+    return true;
+}
+
+/**
  * Parent function to fetch a regexed version of a raw string
  * @param {string} rawString The raw string to be regexed
  * @param {regex_placement} placement The placement of the string
@@ -365,16 +384,9 @@ export function getRegexedString(rawString, placement, { characterOverride, isMa
             }
 
             // Check if the depth is within the min/max depth
-            if (typeof depth === 'number') {
-                if (!isNaN(script.minDepth) && script.minDepth !== null && script.minDepth >= -1 && depth < script.minDepth) {
-                    console.debug(`getRegexedString: Skipping script ${script.scriptName} because depth ${depth} is less than minDepth ${script.minDepth}`);
-                    return;
-                }
-
-                if (!isNaN(script.maxDepth) && script.maxDepth !== null && script.maxDepth >= 0 && depth > script.maxDepth) {
-                    console.debug(`getRegexedString: Skipping script ${script.scriptName} because depth ${depth} is greater than maxDepth ${script.maxDepth}`);
-                    return;
-                }
+            if (!isRegexScriptInDepthRange(script, depth)) {
+                console.debug(`getRegexedString: Skipping script ${script.scriptName} because depth ${depth} is outside its depth limits`);
+                return;
             }
 
             if (script.placement.includes(placement)) {

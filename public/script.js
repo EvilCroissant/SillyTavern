@@ -219,7 +219,7 @@ import { markdownExclusionExt } from './scripts/showdown-exclusion.js';
 import { markdownUnderscoreExt } from './scripts/showdown-underscore.js';
 import { NOTE_MODULE_NAME, initAuthorsNote, metadata_keys, setFloatingPrompt, shouldWIAddPrompt } from './scripts/authors-note.js';
 import { registerPromptManagerMigration } from './scripts/PromptManager.js';
-import { getRegexedString, regex_placement } from './scripts/extensions/regex/engine.js';
+import { getRegexedString, getRegexScripts, isRegexScriptInDepthRange, regex_placement } from './scripts/extensions/regex/engine.js';
 import { initLogprobs, saveLogprobsForActiveMessage } from './scripts/logprobs.js';
 import { FILTER_STATES, FILTER_TYPES, FilterHelper, isFilterState } from './scripts/filters.js';
 import { getCfgPrompt, getGuidanceScale, initCfg } from './scripts/cfg-scale.js';
@@ -1636,6 +1636,9 @@ export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = 
     }
 
     refreshSwipeButtons(false, fade);
+    if (targetChat === chat) {
+        refreshDepthDependentRegex();
+    }
     applyStylePins();
     updateEditArrowClasses();
 
@@ -2156,6 +2159,51 @@ function getMessageDepths(messages) {
         }
     }
     return depths;
+}
+
+/** @type {WeakMap<HTMLElement, { message: ChatMessage, depth: number|undefined }>} */
+const renderedMessageDepths = new WeakMap();
+
+/**
+ * Re-renders loaded messages only when a display regex enters or leaves its
+ * depth range. Unaffected HTML (including embedded frames) stays intact.
+ */
+function refreshDepthDependentRegex() {
+    if (extension_settings.disabledExtensions.includes('regex')) {
+        return;
+    }
+    const scripts = getRegexScripts({ allowedOnly: true }).filter(script =>
+        !script.disabled && script.markdownOnly && (
+            (!isNaN(script.minDepth) && script.minDepth > 0) ||
+            (!isNaN(script.maxDepth) && script.maxDepth !== null && script.maxDepth >= 0)
+        ),
+    );
+    if (!scripts.length) {
+        return;
+    }
+
+    const depths = getMessageDepths(chat);
+    for (const element of chatElement[0].querySelectorAll('.mes')) {
+        const messageId = Number(element.getAttribute('mesid'));
+        const message = chat[messageId];
+        const previous = renderedMessageDepths.get(element);
+        const depth = depths[messageId];
+        if (!previous || !message || message.is_system || previous.depth === depth) {
+            continue;
+        }
+
+        const placement = message.is_user ? regex_placement.USER_INPUT
+            : message.extra?.type === 'narrator' ? regex_placement.SLASH_COMMAND : regex_placement.AI_OUTPUT;
+        const changed = scripts.some(script =>
+            (script.placement.includes(placement) || script.placement.includes(regex_placement.REASONING)) &&
+            isRegexScriptInDepthRange(script, previous.depth) !== isRegexScriptInDepthRange(script, depth),
+        );
+        if (previous.message === message && changed) {
+            updateMessageElement(message, { messageId, messageElement: $(element), messageDepth: depth, deferCodeHighlighting: true });
+        } else {
+            renderedMessageDepths.set(element, { message, depth });
+        }
+    }
 }
 
 /**
@@ -2825,6 +2873,7 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
             : messageElement;
         refreshSwipeButtonsForMessages(swipeMessages);
     }
+    refreshDepthDependentRegex();
     // Don't scroll if not inserting last
     if (!insertAfter && !insertBefore && scroll) {
         scrollChatToBottom({ waitForFrame: true });
@@ -2847,6 +2896,7 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
  * @returns {JQuery<HTMLElement>} Rendered HTMLElement.
  */
 export function updateMessageElement(mes, { messageId = chat.length - 1, messageElement = messageTemplate.clone(), adjustMediaScroll = SCROLL_BEHAVIOR.NONE, messageDepth = undefined, deferCodeHighlighting = false } = {}) {
+    messageDepth ??= getMessageDepth(messageId);
     let avatarImg = getThumbnailUrl('persona', user_avatar);
 
     //for non-user messages
@@ -2926,6 +2976,7 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
     appendMediaToMessage(mes, messageElement, adjustMediaScroll);
     messageElement.find('.mes_text').html(messageHTML);
     addCopyToCodeBlocks(messageElement, { deferHighlighting: deferCodeHighlighting });
+    renderedMessageDepths.set(messageElement[0], { message: mes, depth: messageDepth });
 
     // Set the swipes counter for all non-user messages.
     if (!mes.is_user) {
@@ -9871,6 +9922,7 @@ export function updateViewMessageIds(startIndex = null) {
     chatElement.find('.mes').last().addClass('last_mes');
 
     updateEditArrowClasses();
+    refreshDepthDependentRegex();
 }
 
 export function getFirstDisplayedMessageId() {
@@ -11494,6 +11546,7 @@ function initCharacterSearch() {
 
 // MARK: DOM Handlers Start
 jQuery(async function () {
+    eventSource.on(event_types.MESSAGE_DELETED, refreshDepthDependentRegex);
     setTimeout(function () {
         $('#groupControlsToggle').trigger('click');
         $('#groupCurrentMemberListToggle .inline-drawer-icon').trigger('click');
