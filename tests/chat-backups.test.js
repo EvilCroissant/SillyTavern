@@ -81,12 +81,38 @@ describe('chat backups', () => {
         const chatFile = path.join(workDir, 'flush-chat.jsonl');
         fs.mkdirSync(backupsDir, { recursive: true });
 
-        await chats.trySaveChat(makeChat('first'), chatFile, true, 'flush-user', 'Flush Card', backupsDir);
-        await chats.trySaveChat(makeChat('second'), chatFile, true, 'flush-user', 'Flush Card', backupsDir);
+        await chats.trySaveChat(makeChat('first'), chatFile, false, 'flush-user', 'Flush Card', backupsDir);
+        await chats.trySaveChat(makeChat('second'), chatFile, false, 'flush-user', 'Flush Card', backupsDir);
         await chats.flushChatBackups();
 
         const backupFiles = fs.readdirSync(backupsDir);
         expect(backupFiles).toHaveLength(1);
         expect(fs.readFileSync(path.join(backupsDir, backupFiles[0]), 'utf8')).toContain('second');
+    });
+
+    test('snapshots the original bytes when a user confirms an overwrite', async () => {
+        const backupsDir = path.join(workDir, 'overwrite-backups');
+        const chatFile = path.join(workDir, 'overwrite-chat.jsonl');
+        const originalBytes = Buffer.from([0xef, 0xbb, 0xbf, 0xff, 0x0a]);
+        fs.mkdirSync(backupsDir, { recursive: true });
+        fs.writeFileSync(chatFile, originalBytes);
+
+        await chats.trySaveChat(makeChat('replacement'), chatFile, true, 'overwrite-user', 'Card', backupsDir);
+
+        const snapshots = fs.readdirSync(backupsDir).filter(file => file.startsWith('chat_pre_overwrite_'));
+        expect(snapshots).toHaveLength(1);
+        expect(fs.readFileSync(path.join(backupsDir, snapshots[0]))).toEqual(originalBytes);
+        expect(fs.readFileSync(chatFile, 'utf8')).toContain('replacement');
+    });
+
+    test('keeps the original chat when the overwrite snapshot cannot be written', async () => {
+        const backupsDir = path.join(workDir, 'blocked-backups');
+        const chatFile = path.join(workDir, 'blocked-chat.jsonl');
+        fs.writeFileSync(backupsDir, 'not a directory');
+        fs.writeFileSync(chatFile, 'original');
+
+        await expect(chats.trySaveChat(makeChat('replacement'), chatFile, true, 'blocked-user', 'Card', backupsDir))
+            .rejects.toThrow();
+        expect(fs.readFileSync(chatFile, 'utf8')).toBe('original');
     });
 });

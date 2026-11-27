@@ -30,6 +30,7 @@ const checkIntegrity = !!getConfigValue('backups.chat.checkIntegrity', true, 'bo
 const chatScanConcurrency = 8;
 
 export const CHAT_BACKUPS_PREFIX = 'chat_';
+const PRE_OVERWRITE_BACKUPS_PREFIX = 'chat_pre_overwrite_';
 
 /**
  * Builds a stable filename key for a chat's backups.
@@ -52,11 +53,12 @@ export function getBackupKey(name) {
  * Saves a chat to the backups directory.
  * @param {string} directory The user's backup directory.
  * @param {string} name The name of the chat.
- * @param {string} data The serialized chat to save.
+ * @param {string|Buffer} data The serialized chat to save.
  * @param {string} backupPrefix The file prefix. Typically CHAT_BACKUPS_PREFIX.
  * @returns
  */
 async function backupChat(directory, name, data, backupPrefix = CHAT_BACKUPS_PREFIX) {
+    const isPreOverwrite = backupPrefix === PRE_OVERWRITE_BACKUPS_PREFIX;
     try {
         if (!isBackupEnabled) { return; }
         if (!fs.existsSync(directory)) {
@@ -65,7 +67,9 @@ async function backupChat(directory, name, data, backupPrefix = CHAT_BACKUPS_PRE
         name = getBackupKey(name);
 
         await queueBackupDirectory(directory, async () => {
-            const backupFile = path.join(directory, `${backupPrefix}${name}_${generateTimestamp()}.jsonl`);
+            const timestamp = generateTimestamp();
+            const backupId = isPreOverwrite ? `${timestamp}-${crypto.randomUUID()}` : timestamp;
+            const backupFile = path.join(directory, `${backupPrefix}${name}_${backupId}.jsonl`);
 
             await tryWriteFileAsync(backupFile, data);
             await removeOldBackupsAsync(directory, `${backupPrefix}${name}_`);
@@ -76,6 +80,7 @@ async function backupChat(directory, name, data, backupPrefix = CHAT_BACKUPS_PRE
         });
     } catch (err) {
         console.error(`Could not backup chat for ${name}`, err);
+        if (isPreOverwrite) throw err;
     }
 }
 
@@ -601,6 +606,17 @@ export async function trySaveChat(chatData, filePath, skipIntegrityCheck = false
             throw new IntegrityMismatchError(`Chat integrity check failed for "${filePath}". The expected integrity slug was "${chatIntegritySlug}".`);
         }
 
+        // Save the exact on-disk bytes before a confirmed overwrite, bypassing the regular backup throttle.
+        if (skipIntegrityCheck && isBackupEnabled) {
+            const previousContent = await fs.promises.readFile(filePath).catch(error => {
+                if (error.code === 'ENOENT') return null;
+                throw error;
+            });
+            if (previousContent?.length) {
+                await backupChat(backupDirectory, cardName, previousContent, PRE_OVERWRITE_BACKUPS_PREFIX);
+            }
+        }
+
         await tryWriteFileAsync(filePath, jsonlData);
         await getBackupFunction(handle, cardName)(backupDirectory, cardName, jsonlData);
     });
@@ -1068,7 +1084,7 @@ router.post('/search', validateAvatarUrlMiddleware, async function (request, res
             // Find group chat files for given group ID
             const groupChatsDir = path.join(request.user.directories.groupChats);
             chatFiles = targetGroup.chats
-                .map(chatId => path.join(groupChatsDir, `${chatId}.jsonl`))
+                .map(chatId => path.join(groupChatsDir, sanitize(`${chatId}.jsonl`)))
                 .filter(fileName => fs.existsSync(fileName));
         } else {
             // Regular character chat directory
@@ -1216,7 +1232,7 @@ router.post('/recent', async function (request, response) {
                     }
 
                     const entries = await mapWithConcurrency(groupData.chats, async (chat) => {
-                        const filePath = path.join(request.user.directories.groupChats, `${chat}.jsonl`);
+                        const filePath = path.join(request.user.directories.groupChats, sanitize(`${chat}.jsonl`));
                         try {
                             const stats = await fs.promises.stat(filePath);
                             return { groupId: groupData.id, filePath, mtime: stats.mtimeMs };
